@@ -1862,6 +1862,976 @@ nexhire/
 
 ---
 
-*NexHire System Blueprint v2.0 — Final*
+## 16. Email Response Capture Architecture
+
+### 16.1 Three-Mechanism Design
+
+| Interaction | Mechanism | Who Owns It |
+|---|---|---|
+| Mentor Accept / Reject | Email Action Token (button in email → tokenized URL) | NexHire backend |
+| Candidate Joining Form | Magic Link → Candidate JWT → Portal | NexHire backend |
+| NDA Signing | OpenSign email → OpenSign UI → Webhook back to NexHire | OpenSign |
+| Certificate Request | Magic Link → Candidate JWT → Portal | NexHire backend |
+| Mentor Confirm Start/End | Email reminder → SSO Portal → S20 Lifecycle Actions | NexHire portal |
+
+### 16.2 Email Action Token — Mentor Accept/Reject
+
+```
+Mentor receives assignment email:
+┌──────────────────────────────────────────────────────────────────┐
+│  You've been assigned as Mentor for Riya Sharma                  │
+│  Project: ML Pipeline Optimization · Duration: 8 weeks           │
+│                                                                  │
+│  [✅ Accept Mentoring]          [❌ Decline Mentoring]           │
+│                                                                  │
+│  These links expire in 3 days.                                   │
+└──────────────────────────────────────────────────────────────────┘
+
+Each button = a unique tokenized URL:
+  ACCEPT: https://nexhire.company.com/action/mentor?token=<UUID>&a=ACCEPT
+  REJECT: https://nexhire.company.com/action/mentor?token=<UUID>&a=REJECT
+
+Token stored in action_tokens table:
+  {
+    token_hash:    bcrypt(UUID),     ← stored hashed, raw token only in email
+    action_type:   MENTOR_RESPONSE,
+    referral_id:   <uuid>,
+    actor_user_id: <mentor_user_id>,
+    expires_at:    NOW() + 3 days,
+    used:          false
+  }
+
+ACCEPT flow:
+  Mentor clicks Accept → browser opens confirmation page
+  GET /action/mentor?token=X&a=ACCEPT
+  → Token validated → one-click confirmation → MentorAccepted event published
+  → Token marked used = true (replay-proof)
+  → Confirmation page: "You have accepted mentoring for Riya Sharma."
+
+REJECT flow:
+  Mentor clicks Reject → browser opens mini-form
+  GET /action/mentor?token=X&a=REJECT
+  → Shows: rejection reason textarea (mandatory) + Submit button
+  POST /action/mentor/confirm { token, action: REJECT, reason: "..." }
+  → Reason validated not empty → MentorRejected event published
+  → Confirmation page: "Your response has been recorded."
+```
+
+### 16.3 Magic Link — Candidate Portal Access
+
+```
+GET /candidate/access?token=<UUID>
+
+Flow:
+  1. Hash raw token (SHA-256) → look up in action_tokens
+  2. Validate: not expired, correct action_type
+  3. Issue candidate JWT (8h, scoped strictly to their intern_id)
+  4. Log: token used_at + ip_address
+  5. Redirect based on intern.status:
+       APPROVED              → /candidate/joining-form    (S9)
+       JOINING_FORM_LOCKED   → /candidate/nda             (S10)
+       NDA_SIGNED            → /candidate/status          (S8 — waiting)
+       CLOSED                → /candidate/certificate     (cert request)
+
+  Magic link policy: new link per major lifecycle stage
+    (joining form, NDA reminder, certificate request each get a fresh link)
+```
+
+### 16.4 action_tokens Table
+
+```sql
+CREATE TABLE action_tokens (
+    id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    token_hash   VARCHAR(255) NOT NULL UNIQUE,    -- SHA-256 of raw token
+    action_type  VARCHAR(50)  NOT NULL,           -- MENTOR_RESPONSE | CANDIDATE_ACCESS
+    referral_id  UUID REFERENCES referrals(id),
+    intern_id    UUID REFERENCES interns(id),
+    actor_user_id UUID REFERENCES users(id),
+    expires_at   TIMESTAMPTZ NOT NULL,
+    used         BOOLEAN DEFAULT false,
+    used_at      TIMESTAMPTZ,
+    ip_address   INET,
+    created_at   TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Cleanup job: delete expired tokens older than 30 days
+```
+
+### 16.5 OpenSign Webhook — NDA Capture
+
+```python
+# POST /webhooks/opensign
+# Called by OpenSign when candidate signs, declines, or envelope expires
+
+async def handle_opensign_webhook(payload: OpenSignWebhookPayload):
+    # Step 1: Verify webhook signature (HMAC-SHA256 shared secret)
+    verify_opensign_signature(request.headers, payload)
+
+    # Step 2: Find NDA record by envelope_id
+    nda = await nda_repo.get_by_envelope_id(payload.envelope_id)
+
+    match payload.event:
+        case "document_signed":
+            # Download signed PDF from OpenSign
+            signed_pdf = await opensign_client.download_signed(payload.envelope_id)
+            # Archive to Azure Blob Storage
+            blob_key = await blob_service.upload(signed_pdf, doc_type=DocType.SIGNED_NDA)
+            # Update record
+            await nda_repo.mark_signed(nda.id, signed_at=payload.signed_at,
+                                        document_key=blob_key)
+            # Publish event → workflow unblocks
+            await event_bus.publish(NdaSigned(intern_id=nda.intern_id))
+
+        case "document_declined":
+            await nda_repo.mark_declined(nda.id)
+            await event_bus.publish(NdaDeclined(intern_id=nda.intern_id))
+
+        case "envelope_expired":
+            # Only if OpenSign expires before our Day-5 job fires
+            await nda_repo.mark_expired(nda.id)
+            await event_bus.publish(NdaExpired(intern_id=nda.intern_id))
+```
+
+---
+
+## 17. Error Handling — Complete System Design
+
+### 17.1 Error Handling Philosophy
+
+NexHire follows four principles for error handling:
+
+```
+1. FAIL LOUDLY TO DEVELOPERS    → structured logs + Azure Monitor alerts
+2. FAIL GRACEFULLY TO USERS     → friendly messages, never raw stack traces
+3. NEVER LOSE STATE             → every operation is recoverable or audited
+4. DEGRADE GRACEFULLY           → AI failures don't block core HR workflows
+```
+
+Every error in the system falls into one of five categories:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  ERROR TAXONOMY                                                 │
+├──────────────────────┬──────────────────────────────────────────┤
+│  VALIDATION_ERROR    │ Input doesn't meet business rules        │
+│                      │ HTTP 400 · User fixes input              │
+├──────────────────────┼──────────────────────────────────────────┤
+│  AUTH_ERROR          │ Identity / permission failure            │
+│                      │ HTTP 401/403 · Redirect to login         │
+├──────────────────────┼──────────────────────────────────────────┤
+│  BUSINESS_RULE_ERROR │ Valid input, but violates a workflow rule │
+│                      │ HTTP 422 · User shown specific reason    │
+├──────────────────────┼──────────────────────────────────────────┤
+│  INTEGRATION_ERROR   │ External service failed (OpenSign, Azure)│
+│                      │ HTTP 502/503 · Retry + ops alert         │
+├──────────────────────┼──────────────────────────────────────────┤
+│  SYSTEM_ERROR        │ Unexpected crash / DB failure            │
+│                      │ HTTP 500 · Logged + ops alerted          │
+└──────────────────────┴──────────────────────────────────────────┘
+```
+
+### 17.2 Standard Error Response Format
+
+Every error from the NexHire API returns the same structured envelope — never a raw Python traceback:
+
+```json
+{
+  "error": {
+    "code": "COLLEGE_CAP_EXCEEDED",
+    "category": "BUSINESS_RULE_ERROR",
+    "message": "You have already referred 2 students from VIT Vellore. The maximum limit per referrer per college is 2.",
+    "details": {
+      "college": "VIT Vellore",
+      "current_count": 2,
+      "max_allowed": 2,
+      "referrer_id": "usr_abc123"
+    },
+    "request_id": "req_7f3a91bc",
+    "timestamp": "2025-08-01T10:23:45Z",
+    "docs_url": "https://nexhire.internal/docs/errors#COLLEGE_CAP_EXCEEDED"
+  }
+}
+```
+
+**Key fields:**
+- `code` — machine-readable, unique error identifier (frontend maps this to UI messages)
+- `category` — error type (frontend decides behavior: toast vs modal vs redirect)
+- `message` — human-readable, safe to display directly to the user
+- `details` — structured context (never includes PII beyond what user already knows)
+- `request_id` — correlates with Azure Application Insights trace for debugging
+- `docs_url` — internal error reference (helps 3-person dev team debug quickly)
+
+### 17.3 Complete Error Code Registry
+
+#### Validation Errors (HTTP 400)
+
+| Code | Trigger | User Message |
+|---|---|---|
+| `INVALID_YEAR_OF_STUDY` | year_of_study not in [2,3,4] | "Only 2nd, 3rd, and 4th year students are eligible for this program." |
+| `GRADUATED_STUDENT_INELIGIBLE` | graduation_year ≤ current year | "Graduated students are not eligible. This program is for current students only." |
+| `MISSING_MANDATORY_FIELD` | Required field empty | "Please complete all required fields before submitting." |
+| `INVALID_DATE_RANGE` | start_date ≥ end_date | "Internship end date must be after the start date." |
+| `INVALID_START_DATE_PAST` | start_date < today | "Internship start date cannot be in the past." |
+| `INVALID_FILE_TYPE` | Upload is not PDF/DOCX/JPG/PNG | "Only PDF, DOCX, JPG, and PNG files are accepted." |
+| `FILE_TOO_LARGE` | File > 5MB | "File size exceeds the 5MB limit. Please compress and retry." |
+| `INVALID_PHONE_FORMAT` | Phone doesn't match E.164 | "Please enter a valid phone number including country code." |
+| `INVALID_EMAIL_FORMAT` | Email format invalid | "Please enter a valid email address." |
+| `INVALID_GOVT_ID_FORMAT` | Aadhaar/PAN pattern mismatch | "The government ID format is invalid. Please check and re-enter." |
+| `UNPAID_CONSENT_REQUIRED` | unpaid_consent = false | "Candidate must confirm acceptance of unpaid internship terms." |
+| `INPERSON_READY_REQUIRED` | inperson_ready = false | "Candidate must confirm in-person availability." |
+| `JOINING_FORM_VERSION_CONFLICT` | Optimistic lock version mismatch | "This form was updated elsewhere. Please refresh and re-enter your changes." |
+
+#### Auth Errors (HTTP 401 / 403)
+
+| Code | Trigger | User Message |
+|---|---|---|
+| `JWT_EXPIRED` | JWT past 8h expiry | "Your session has expired. Please log in again." |
+| `JWT_INVALID` | Tampered or malformed token | "Authentication failed. Please log in again." |
+| `SSO_TOKEN_INVALID` | Azure AD OIDC token rejected | "Login failed. Please try again or contact IT." |
+| `MAGIC_LINK_EXPIRED` | Token past expires_at | "This link has expired. Please request a new access link from HR." |
+| `MAGIC_LINK_USED` | Token already used (used = true) | "This link has already been used. Please request a new link." |
+| `MAGIC_LINK_INVALID` | Token hash not found in DB | "This link is invalid or has been tampered with." |
+| `INSUFFICIENT_PERMISSIONS` | Role lacks required permission | "You don't have permission to perform this action." |
+| `ACTION_TOKEN_EXPIRED` | Mentor action link past 3 days | "This response link has expired. A new one has been sent to your email." |
+| `ACTION_TOKEN_USED` | Mentor clicked link twice | "You have already submitted your response for this mentoring request." |
+| `CANDIDATE_RECORD_MISMATCH` | Candidate JWT internId doesn't match route | "Access denied. This record does not belong to your account." |
+
+#### Business Rule Errors (HTTP 422)
+
+| Code | Trigger | User Message |
+|---|---|---|
+| `COLLEGE_CAP_EXCEEDED` | Referrer has 2 active referrals from same college | "You've reached the maximum of 2 referrals from [College]. Select a different college." |
+| `REFERRER_IS_MENTOR` | referrer_id = mentor_id | "The referrer and mentor cannot be the same person." |
+| `MENTOR_AT_CAPACITY` | mentor.active_mentee_count = 4 | "[Mentor Name] currently has 4 active mentees and cannot accept new assignments." |
+| `DUPLICATE_CANDIDATE_BLOCKED` | Duplicate score ≥ 0.9 | "A referral for this candidate already exists (Referral #XXXX). Please check existing records." |
+| `DUPLICATE_CANDIDATE_WARNING` | Duplicate score 0.6–0.89 | Advisory warning shown — not blocked, HR must confirm |
+| `NDA_NOT_SIGNED_BLOCK` | Attempt to mark intern ACTIVE before NDA signed | "Internship cannot begin. The NDA has not been signed yet." |
+| `JOINING_FORM_NOT_LOCKED` | Non-Worker ID attempted before form lock | "The joining form must be reviewed and locked by HR before ID creation." |
+| `MAX_MENTOR_ATTEMPTS_REACHED` | mentor_attempt_count = 3 and new attempt requested | "Maximum mentor assignment attempts (3) reached. This referral cannot proceed." |
+| `REFERRAL_NOT_IN_VALID_STATE` | State machine transition guard fails | "This action cannot be performed. The referral is currently in [STATUS] state." |
+| `MENTOR_REJECTION_REASON_MISSING` | Mentor submits rejection without reason | "A reason is required when declining a mentoring assignment." |
+| `JOINING_FORM_ALREADY_LOCKED` | Edit attempted after HR lock | "This form has been locked by HR and can no longer be modified." |
+| `EXTENSION_AFTER_END_DATE` | Extension requested after actual_end_date | "Extensions must be requested before the internship end date." |
+| `NON_WORKER_ID_ALREADY_ISSUED` | Duplicate ID issuance attempt | "A Non-Worker ID has already been issued for this intern." |
+| `INTERNSHIP_NOT_ACTIVE` | Closure attempted on non-ACTIVE record | "Only active internships can be closed. Current status: [STATUS]." |
+
+#### Integration Errors (HTTP 502 / 503)
+
+| Code | Service | Behavior |
+|---|---|---|
+| `AZURE_OPENAI_UNAVAILABLE` | Azure OpenAI | AI features degrade gracefully; form works without prefill |
+| `AZURE_OPENAI_RATE_LIMITED` | Azure OpenAI | Exponential backoff (1s, 2s, 4s, 8s); cached result served if available |
+| `AZURE_OPENAI_QUOTA_EXCEEDED` | Azure OpenAI | All AI touchpoints switch to manual mode; ops alerted via Azure Monitor |
+| `OPENSIGN_UNAVAILABLE` | OpenSign Docker | NDA issuance queued; HR alerted; retry every 1 hour |
+| `OPENSIGN_WEBHOOK_INVALID` | OpenSign webhook | Signature validation failed; request rejected; polling fallback activates |
+| `GMAIL_API_UNAVAILABLE` | Gmail API | Email queued in notifications table; retry every 15 min; dead-letter at 24h |
+| `GMAIL_RATE_LIMITED` | Gmail API | Exponential backoff; queue drains when limit resets |
+| `GRAPH_API_UNAVAILABLE` | Microsoft Graph | AD task remains PENDING; IT alerted; retry every 30 min |
+| `GRAPH_API_AUTH_FAILED` | Microsoft Graph | App credential refresh attempted; ops alerted if refresh fails |
+| `AZURE_BLOB_UNAVAILABLE` | Azure Blob Storage | Upload queued; non-blocking for form submission; retry every 5 min |
+| `AZURE_BLOB_UPLOAD_FAILED` | Azure Blob Storage | Upload retried 3x; if all fail, user shown re-upload prompt |
+| `REDIS_UNAVAILABLE` | Azure Redis | Rate limiting falls back to in-memory (restart-unsafe); AI cache bypassed |
+| `DATABASE_UNAVAILABLE` | PostgreSQL | 503 returned; connection pool retries 3x with 2s backoff |
+
+#### System Errors (HTTP 500)
+
+| Code | Trigger | Behavior |
+|---|---|---|
+| `UNEXPECTED_ERROR` | Any unhandled exception | Generic user message; full stack trace logged to Application Insights; ops alerted |
+| `STATE_MACHINE_VIOLATION` | Code attempted an invalid FSM transition | Full audit log entry; ops alerted; referral status unchanged |
+| `AUDIT_LOG_FAILURE` | Audit event could not be written | Request aborted entirely (audit integrity > operation success) |
+| `SCHEDULER_JOB_FAILED` | APScheduler job crashed | Job retry after 5 min; max 3 retries; dead-letter logged to Azure Service Bus |
+| `EVENT_BUS_FAILURE` | In-process event could not be delivered | Operation rolled back; event logged to outbox for retry |
+
+### 17.4 FastAPI Global Error Handler
+
+```python
+# app/middleware/error_handler.py
+
+from fastapi import Request
+from fastapi.responses import JSONResponse
+from app.shared.exceptions import (
+    ValidationError, AuthError, BusinessRuleError,
+    IntegrationError, SystemError
+)
+import uuid
+import structlog
+
+logger = structlog.get_logger()
+
+def register_error_handlers(app: FastAPI):
+
+    @app.exception_handler(ValidationError)
+    async def handle_validation_error(request: Request, exc: ValidationError):
+        request_id = str(uuid.uuid4())
+        logger.warning("validation_error",
+                        code=exc.code, path=request.url.path,
+                        request_id=request_id)
+        return JSONResponse(status_code=400, content={
+            "error": {
+                "code": exc.code,
+                "category": "VALIDATION_ERROR",
+                "message": exc.user_message,
+                "details": exc.details or {},
+                "request_id": request_id,
+                "timestamp": utcnow().isoformat()
+            }
+        })
+
+    @app.exception_handler(BusinessRuleError)
+    async def handle_business_rule_error(request: Request, exc: BusinessRuleError):
+        request_id = str(uuid.uuid4())
+        logger.warning("business_rule_violation",
+                        code=exc.code, rule=exc.rule_id,
+                        entity_id=exc.entity_id, request_id=request_id)
+        # Every business rule violation is also an audit event
+        await audit_publisher.publish(AuditEvent(
+            event_type="BUSINESS_RULE_VIOLATED",
+            entity_id=exc.entity_id,
+            payload={"code": exc.code, "rule": exc.rule_id}
+        ))
+        return JSONResponse(status_code=422, content={
+            "error": {
+                "code": exc.code,
+                "category": "BUSINESS_RULE_ERROR",
+                "message": exc.user_message,
+                "details": exc.details or {},
+                "request_id": request_id,
+                "timestamp": utcnow().isoformat()
+            }
+        })
+
+    @app.exception_handler(IntegrationError)
+    async def handle_integration_error(request: Request, exc: IntegrationError):
+        request_id = str(uuid.uuid4())
+        logger.error("integration_error",
+                      code=exc.code, service=exc.service,
+                      status_code=exc.upstream_status,
+                      request_id=request_id, exc_info=exc)
+        # Alert ops team via Azure Monitor custom metric
+        await metrics.increment("integration_error", tags={"service": exc.service})
+        return JSONResponse(status_code=502, content={
+            "error": {
+                "code": exc.code,
+                "category": "INTEGRATION_ERROR",
+                "message": f"A third-party service is temporarily unavailable. "
+                           f"Your action has been queued and will be retried automatically.",
+                "request_id": request_id,
+                "timestamp": utcnow().isoformat()
+            }
+        })
+
+    @app.exception_handler(Exception)
+    async def handle_unexpected_error(request: Request, exc: Exception):
+        request_id = str(uuid.uuid4())
+        # Full stack trace — NEVER sent to client, only to Application Insights
+        logger.exception("unexpected_error",
+                          path=request.url.path,
+                          method=request.method,
+                          request_id=request_id,
+                          exc_info=exc)
+        await metrics.increment("system_error")
+        return JSONResponse(status_code=500, content={
+            "error": {
+                "code": "UNEXPECTED_ERROR",
+                "category": "SYSTEM_ERROR",
+                "message": "Something went wrong on our end. "
+                           "Our team has been notified. Please try again in a moment.",
+                "request_id": request_id,
+                "timestamp": utcnow().isoformat()
+            }
+        })
+```
+
+### 17.5 Business Rule Exception Hierarchy
+
+```python
+# app/shared/exceptions.py
+
+class NexHireBaseException(Exception):
+    """Base for all NexHire exceptions."""
+    code: str
+    user_message: str
+    details: dict = {}
+
+# ── Validation ──────────────────────────────────────────────────────
+class ValidationError(NexHireBaseException):
+    """Input data violates format or type constraints."""
+    pass
+
+class InvalidYearOfStudyError(ValidationError):
+    code = "INVALID_YEAR_OF_STUDY"
+    user_message = "Only 2nd, 3rd, and 4th year students are eligible."
+
+class InvalidFiletypeError(ValidationError):
+    code = "INVALID_FILE_TYPE"
+    user_message = "Only PDF, DOCX, JPG, and PNG files are accepted."
+
+# ── Auth ─────────────────────────────────────────────────────────────
+class AuthError(NexHireBaseException):
+    """Identity or permission failure."""
+    pass
+
+class JwtExpiredError(AuthError):
+    code = "JWT_EXPIRED"
+    user_message = "Your session has expired. Please log in again."
+
+class MagicLinkExpiredError(AuthError):
+    code = "MAGIC_LINK_EXPIRED"
+    user_message = "This link has expired. Please request a new one from HR."
+
+class InsufficientPermissionsError(AuthError):
+    code = "INSUFFICIENT_PERMISSIONS"
+    user_message = "You don't have permission to perform this action."
+
+# ── Business Rules ───────────────────────────────────────────────────
+class BusinessRuleError(NexHireBaseException):
+    """Valid input violates a workflow or domain rule."""
+    rule_id: str
+    entity_id: str = None
+
+class CollegeCapExceededError(BusinessRuleError):
+    code = "COLLEGE_CAP_EXCEEDED"
+    rule_id = "RULE-E2"
+    def __init__(self, college: str):
+        self.user_message = (f"You've reached the maximum of 2 referrals "
+                             f"from {college}.")
+        self.details = {"college": college, "max_allowed": 2}
+
+class MentorAtCapacityError(BusinessRuleError):
+    code = "MENTOR_AT_CAPACITY"
+    rule_id = "RULE-M-CAP"
+    def __init__(self, mentor_name: str):
+        self.user_message = (f"{mentor_name} currently has 4 active mentees "
+                             f"and cannot accept new assignments.")
+        self.details = {"mentor_name": mentor_name, "max_mentees": 4}
+
+class NdaNotSignedBlockError(BusinessRuleError):
+    code = "NDA_NOT_SIGNED_BLOCK"
+    rule_id = "RULE-N1"
+    user_message = "Internship cannot begin. The NDA has not been signed yet."
+
+class InvalidStateTransitionError(BusinessRuleError):
+    code = "REFERRAL_NOT_IN_VALID_STATE"
+    rule_id = "FSM-GUARD"
+    def __init__(self, current_status: str, attempted_action: str):
+        self.user_message = (f"This action cannot be performed. "
+                             f"The referral is currently in {current_status} state.")
+        self.details = {"current_status": current_status,
+                        "attempted_action": attempted_action}
+
+class MaxMentorAttemptsReachedError(BusinessRuleError):
+    code = "MAX_MENTOR_ATTEMPTS_REACHED"
+    rule_id = "RULE-M3"
+    user_message = ("Maximum mentor assignment attempts (3) reached. "
+                    "This referral cannot proceed further.")
+
+# ── Integration ──────────────────────────────────────────────────────
+class IntegrationError(NexHireBaseException):
+    """External service failure."""
+    service: str
+    upstream_status: int = None
+    retryable: bool = True
+
+class AzureOpenAiError(IntegrationError):
+    code = "AZURE_OPENAI_UNAVAILABLE"
+    service = "azure_openai"
+    user_message = "AI features are temporarily unavailable. You can continue manually."
+
+class OpenSignError(IntegrationError):
+    code = "OPENSIGN_UNAVAILABLE"
+    service = "opensign"
+    user_message = "Document signing is temporarily unavailable. It will be sent automatically when restored."
+
+class GmailApiError(IntegrationError):
+    code = "GMAIL_API_UNAVAILABLE"
+    service = "gmail"
+    user_message = "Email delivery is delayed. Your action was saved and notifications will be sent shortly."
+
+class GraphApiError(IntegrationError):
+    code = "GRAPH_API_UNAVAILABLE"
+    service = "microsoft_graph"
+    user_message = "Account provisioning is temporarily unavailable. IT has been notified."
+
+class AzureBlobError(IntegrationError):
+    code = "AZURE_BLOB_UNAVAILABLE"
+    service = "azure_blob"
+    user_message = "File storage is temporarily unavailable. Please retry the upload."
+```
+
+### 17.6 AI-Specific Error Handling & Graceful Degradation
+
+```python
+# app/modules/ai/service.py
+
+class AiService:
+    """
+    All AI operations degrade gracefully — AI failure never blocks
+    a core HR workflow. Every failure is logged for model monitoring.
+    """
+
+    async def parse_resume(self, file_bytes: bytes,
+                            mime_type: str) -> ParseResult:
+        try:
+            result = await self._call_azure_openai_with_retry(
+                prompt=RESUME_PARSE_PROMPT,
+                file_bytes=file_bytes,
+                timeout=15.0
+            )
+            return ParseResult(success=True, data=result,
+                               confidence_scores=result.confidences)
+
+        except asyncio.TimeoutError:
+            logger.warning("ai_parse_timeout", touchpoint="RESUME_PARSE")
+            await metrics.increment("ai_timeout", tags={"touchpoint": "resume_parse"})
+            # Graceful degradation: return empty prefill, form works normally
+            return ParseResult(
+                success=False,
+                degradation_reason="AI_TIMEOUT",
+                user_message="Auto-fill is temporarily unavailable. Please fill in the details manually.",
+                data={}
+            )
+
+        except AzureOpenAiError as e:
+            logger.error("ai_unavailable", touchpoint="RESUME_PARSE", exc_info=e)
+            return ParseResult(
+                success=False,
+                degradation_reason="AI_UNAVAILABLE",
+                user_message="Auto-fill is temporarily unavailable. Please fill in the details manually.",
+                data={}
+            )
+
+        except json.JSONDecodeError as e:
+            # Model returned malformed JSON
+            logger.warning("ai_malformed_output", touchpoint="RESUME_PARSE",
+                           raw_output=e.doc[:200])
+            await metrics.increment("ai_malformed_output")
+            # Retry once with corrected prompt
+            return await self._retry_parse_with_correction(file_bytes, mime_type)
+
+    async def _call_azure_openai_with_retry(self, **kwargs) -> dict:
+        """Exponential backoff retry for rate limits."""
+        delays = [1, 2, 4, 8]
+        last_error = None
+        for delay in delays:
+            try:
+                return await self.openai_client.complete(**kwargs)
+            except RateLimitError as e:
+                last_error = e
+                logger.warning("azure_openai_rate_limited", retry_in=delay)
+                await asyncio.sleep(delay)
+            except QuotaExceededError:
+                await metrics.increment("azure_openai_quota_exceeded")
+                raise AzureOpenAiError(code="AZURE_OPENAI_QUOTA_EXCEEDED",
+                                        service="azure_openai")
+        raise last_error
+
+    async def suggest_mentors(self, candidate: Candidate,
+                               excluded_ids: list[UUID]) -> list[MentorRecommendation]:
+        """
+        Mentor suggestions: cached for 1 hour.
+        If AI fails, return rule-based suggestions (availability + capacity only).
+        """
+        cache_key = f"mentor_suggestions:{candidate.id}"
+        cached = await redis.get(cache_key)
+        if cached:
+            return json.loads(cached)
+
+        try:
+            suggestions = await self._generate_mentor_suggestions(
+                candidate, excluded_ids)
+            await redis.set(cache_key, json.dumps(suggestions), ex=3600)
+            return suggestions
+
+        except (AzureOpenAiError, asyncio.TimeoutError):
+            logger.warning("ai_mentor_match_fallback", candidate_id=candidate.id)
+            # Fallback: rule-based only (no AI narrative, just score)
+            return self._rule_based_mentor_ranking(candidate, excluded_ids)
+```
+
+### 17.7 Database Error Handling
+
+```python
+# app/infrastructure/database.py
+
+class DatabaseErrorHandler:
+    """
+    Wraps all DB operations with consistent error handling.
+    Distinguishes between transient (retry) and permanent (fail-fast) errors.
+    """
+
+    RETRYABLE_ERRORS = (
+        OperationalError,       # connection issues
+        TimeoutError,
+        DeadlockDetectedError
+    )
+
+    PERMANENT_ERRORS = (
+        IntegrityError,         # constraint violations
+        DataError,              # bad data type
+        UniqueViolation
+    )
+
+    async def execute_with_retry(self, operation, max_retries=3):
+        for attempt in range(max_retries):
+            try:
+                async with self.session() as session:
+                    async with session.begin():
+                        return await operation(session)
+
+            except self.PERMANENT_ERRORS as e:
+                # Never retry — map to business error
+                raise self._map_integrity_error(e)
+
+            except self.RETRYABLE_ERRORS as e:
+                if attempt == max_retries - 1:
+                    logger.exception("db_permanent_failure", exc_info=e)
+                    raise SystemError(code="DATABASE_UNAVAILABLE",
+                                      user_message="A database error occurred. Please try again.")
+                wait = 2 ** attempt
+                logger.warning("db_transient_error_retry",
+                               attempt=attempt + 1, retry_in=wait)
+                await asyncio.sleep(wait)
+
+    def _map_integrity_error(self, e: IntegrityError) -> BusinessRuleError:
+        """Maps PostgreSQL constraint violations to domain errors."""
+        msg = str(e.orig)
+        if "idx_referrals_active_candidate" in msg:
+            return BusinessRuleError(
+                code="DUPLICATE_CANDIDATE_BLOCKED",
+                user_message="An active referral already exists for this candidate."
+            )
+        if "unique constraint" in msg and "non_worker_id" in msg:
+            return BusinessRuleError(
+                code="NON_WORKER_ID_ALREADY_ISSUED",
+                user_message="A Non-Worker ID has already been issued for this intern."
+            )
+        # Unknown constraint — treat as system error
+        logger.error("unmapped_integrity_error", detail=msg)
+        raise SystemError(code="UNEXPECTED_ERROR",
+                          user_message="A data conflict occurred. Please contact support.")
+```
+
+### 17.8 Scheduler Job Error Handling
+
+```python
+# app/infrastructure/scheduler.py
+
+class NexHireScheduler:
+    """
+    All APScheduler jobs wrapped with:
+      - Idempotency keys (prevent double execution)
+      - Structured error logging
+      - Dead-letter to Azure Service Bus after max retries
+      - Audit event on every job failure
+    """
+
+    def wrap_job(self, job_fn, job_name: str, max_retries: int = 3):
+        async def wrapped():
+            idempotency_key = f"{job_name}:{utcnow().date()}"
+
+            # Prevent double execution (e.g., after restart)
+            if await redis.get(f"job_lock:{idempotency_key}"):
+                logger.info("job_skipped_idempotent", job=job_name)
+                return
+
+            await redis.set(f"job_lock:{idempotency_key}", "1", ex=3600)
+
+            for attempt in range(max_retries):
+                try:
+                    await job_fn()
+                    logger.info("job_completed", job=job_name, attempt=attempt + 1)
+                    return
+
+                except Exception as e:
+                    logger.error("job_failed",
+                                  job=job_name,
+                                  attempt=attempt + 1,
+                                  exc_info=e)
+                    if attempt == max_retries - 1:
+                        # Dead-letter: send to Azure Service Bus for manual review
+                        await service_bus.send_dead_letter(
+                            queue="scheduler-dead-letter",
+                            message={
+                                "job": job_name,
+                                "failed_at": utcnow().isoformat(),
+                                "error": str(e),
+                                "attempts": max_retries
+                            }
+                        )
+                        # Audit event for compliance
+                        await audit_publisher.publish(AuditEvent(
+                            event_type="SCHEDULER_JOB_DEAD_LETTERED",
+                            payload={"job": job_name, "error": str(e)}
+                        ))
+                        # Ops alert
+                        await metrics.increment("scheduler_dead_letter",
+                                                tags={"job": job_name})
+                    else:
+                        await asyncio.sleep(5 * (attempt + 1))
+        return wrapped
+
+# Job registrations
+scheduler.add_job(
+    wrap_job(check_mentor_timeouts, "check_mentor_timeouts"),
+    trigger="interval", hours=1, id="mentor_timeout"
+)
+scheduler.add_job(
+    wrap_job(check_nda_timeouts, "check_nda_timeouts"),
+    trigger="interval", hours=6, id="nda_timeout"
+)
+scheduler.add_job(
+    wrap_job(check_sla_breaches, "check_sla_breaches"),
+    trigger="interval", hours=1, id="sla_breach"
+)
+scheduler.add_job(
+    wrap_job(run_compliance_checks, "run_compliance_checks"),
+    trigger="interval", hours=6, id="compliance_check"
+)
+```
+
+### 17.9 Event Bus Error Handling
+
+```python
+# app/infrastructure/event_bus.py
+
+class InProcessEventBus:
+    """
+    In-process async event bus with:
+      - Guaranteed delivery within the same request transaction
+      - Failed handler isolation (one handler failure doesn't affect others)
+      - Outbox pattern for cross-transaction events
+    """
+
+    async def publish(self, event: DomainEvent):
+        handlers = self._handlers.get(type(event), [])
+        errors = []
+
+        for handler in handlers:
+            try:
+                await handler.handle(event)
+            except Exception as e:
+                # One handler failing does NOT stop other handlers
+                logger.error("event_handler_failed",
+                              event_type=type(event).__name__,
+                              handler=type(handler).__name__,
+                              exc_info=e)
+                errors.append((handler, e))
+                # Store in outbox for retry
+                await self.outbox.store(event, handler, str(e))
+
+        if errors:
+            await metrics.increment("event_handler_failures",
+                                    count=len(errors))
+            # Non-fatal: operation succeeded, handlers will retry via outbox
+
+    async def process_outbox(self):
+        """Runs every 2 minutes — retries failed event deliveries."""
+        failed_events = await self.outbox.get_pending(limit=50)
+        for item in failed_events:
+            try:
+                handler = self._resolve_handler(item.handler_class)
+                await handler.handle(item.event)
+                await self.outbox.mark_processed(item.id)
+            except Exception as e:
+                await self.outbox.increment_retry(item.id)
+                if item.retry_count >= 5:
+                    await self.outbox.dead_letter(item.id, str(e))
+                    logger.error("event_dead_lettered",
+                                  event=item.event_type,
+                                  handler=item.handler_class)
+```
+
+### 17.10 Frontend Error Handling Strategy
+
+```typescript
+// frontend/src/lib/axios.ts
+
+// Global Axios interceptor — handles all API error responses consistently
+
+api.interceptors.response.use(
+  (response) => response,
+  async (error: AxiosError<NexHireErrorResponse>) => {
+    const err = error.response?.data?.error;
+
+    if (!err) {
+      // Network error — no response received
+      toast.error("Connection lost. Please check your network and retry.");
+      return Promise.reject(error);
+    }
+
+    switch (err.category) {
+
+      case "AUTH_ERROR":
+        if (err.code === "JWT_EXPIRED") {
+          // Attempt silent token refresh
+          const refreshed = await attemptTokenRefresh();
+          if (refreshed) return api.request(error.config!);
+          // Refresh failed → redirect to login
+          window.location.href = "/auth/login";
+        } else if (err.code === "MAGIC_LINK_EXPIRED") {
+          // Show full-page error (not toast) with request-new-link CTA
+          navigate("/candidate/link-expired");
+        } else if (err.code === "INSUFFICIENT_PERMISSIONS") {
+          toast.error("You don't have permission to do this.");
+        }
+        break;
+
+      case "VALIDATION_ERROR":
+        // These are typically caught at form level before API call
+        // But if they reach here, show inline
+        toast.error(err.message);
+        break;
+
+      case "BUSINESS_RULE_ERROR":
+        // Show in a modal with full context (not just a toast)
+        showBusinessRuleModal({
+          code: err.code,
+          message: err.message,
+          details: err.details
+        });
+        break;
+
+      case "INTEGRATION_ERROR":
+        // Reassuring message — action was saved, will retry
+        toast.warning(err.message, { duration: 6000 });
+        break;
+
+      case "SYSTEM_ERROR":
+        // Show request_id so user can report to IT
+        showSystemErrorModal({
+          message: err.message,
+          requestId: err.request_id
+        });
+        break;
+    }
+
+    return Promise.reject(error);
+  }
+);
+```
+
+### 17.11 React Error Boundary (Catches Render Crashes)
+
+```tsx
+// frontend/src/app/ErrorBoundary.tsx
+
+class NexHireErrorBoundary extends React.Component {
+  state = { hasError: false, error: null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { hasError: true, error };
+  }
+
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    // Report to Azure Application Insights
+    appInsights.trackException({
+      exception: error,
+      properties: { componentStack: info.componentStack }
+    });
+  }
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div className="flex flex-col items-center justify-center h-screen gap-4">
+          <h1 className="text-2xl font-semibold text-gray-800">
+            Something went wrong
+          </h1>
+          <p className="text-gray-500">
+            This page encountered an error. Our team has been notified.
+          </p>
+          <Button onClick={() => window.location.reload()}>
+            Reload Page
+          </Button>
+          <Button variant="ghost" onClick={() => window.location.href = "/"}>
+            Go to Dashboard
+          </Button>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+// Wrap every route
+<NexHireErrorBoundary>
+  <RouterProvider router={router} />
+</NexHireErrorBoundary>
+```
+
+### 17.12 Audit Integrity Error Handling
+
+```python
+# The audit log is the most critical subsystem.
+# If an audit event cannot be written, the operation itself is aborted.
+
+class AuditPublisher:
+    async def publish(self, event: AuditEvent):
+        try:
+            # Compute checksum chain
+            last = await self.repo.get_last_checksum()
+            checksum = sha256(f"{last.checksum}{event.payload_json}".encode()).hexdigest()
+
+            await self.repo.insert(event, checksum=checksum)
+
+        except Exception as e:
+            # Audit failure is FATAL — we cannot let operations proceed
+            # without an audit trail (legal and compliance requirement)
+            logger.critical("AUDIT_LOG_FAILURE",
+                             event_type=event.event_type,
+                             exc_info=e)
+            await metrics.increment("audit_log_failure")
+            # Ops paged immediately via Azure Monitor alert
+            raise SystemError(
+                code="AUDIT_LOG_FAILURE",
+                user_message="A critical system error occurred. "
+                             "Your action could not be completed. "
+                             "Please contact the system administrator immediately."
+            )
+```
+
+### 17.13 Error Monitoring & Alerting (Azure Monitor Rules)
+
+| Alert | Condition | Severity | Notification |
+|---|---|---|---|
+| Audit log failure | `audit_log_failure` count > 0 | Critical (P0) | Page on-call immediately |
+| Scheduler dead letter | `scheduler_dead_letter` count > 0 | High (P1) | Email ops team |
+| Azure OpenAI quota exceeded | `azure_openai_quota_exceeded` count > 0 | High (P1) | Email + Slack ops |
+| Integration error spike | Any integration error > 10 in 5 min | Medium (P2) | Email ops team |
+| System error rate > 1% | `system_error` / total_requests > 0.01 | High (P1) | Email ops team |
+| AI override rate > 20% | Weekly batch metric | Medium (P2) | Email Program Owner |
+| Email bounce rate > 1% | `email_bounce` / `email_sent` > 0.01 | Low (P3) | Weekly report |
+| SLA breach | Any task past `sla_deadline` | Medium (P2) | Auto-escalation (in-app + email) |
+| Magic link abuse | >5 invalid token attempts from same IP | High (P1) | Block IP + alert security |
+
+### 17.14 Error Handling Coverage Summary
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  ERROR HANDLING COVERAGE MAP                                        │
+├──────────────────────────────────────┬──────────────────────────────┤
+│  Layer                               │  Mechanism                   │
+├──────────────────────────────────────┼──────────────────────────────┤
+│  Frontend form validation            │ React Hook Form + Zod schemas│
+│  API input validation                │ Pydantic v2 models           │
+│  Business rule enforcement           │ Service layer + exception    │
+│  State machine violations            │ FSM guard + exception        │
+│  Database constraint violations      │ Mapped to domain exceptions  │
+│  AI failures                         │ Graceful degradation + retry │
+│  Integration failures                │ Circuit breaker + queue      │
+│  Scheduler job failures              │ Retry + dead-letter + alert  │
+│  Event bus failures                  │ Outbox pattern + retry       │
+│  Audit log failures                  │ Fatal abort + P0 alert       │
+│  Token replay attacks                │ Single-use + hash validation │
+│  React render crashes                │ Error boundary + AI insights │
+│  Unhandled exceptions                │ Global handler + P1 alert    │
+│  Network errors (frontend)           │ Axios interceptor + toast    │
+└──────────────────────────────────────┴──────────────────────────────┘
+```
+
+---
+
+*NexHire System Blueprint v2.1 — Error Handling & Email Capture Added*
 *Stack: React + TypeScript · Python FastAPI · PostgreSQL · Azure OpenAI · Azure AD · Gmail API · OpenSign · Azure Blob*
 *Architecture: Modular Monolith · AI Coverage: 75% · Team: 3 engineers*
