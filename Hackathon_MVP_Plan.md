@@ -1,653 +1,1867 @@
-# Intern Flow — Hackathon MVP Plan
+# NexHire — AI-Powered Intern Referral Management Platform
+## System Blueprint v2.0 — Final Specification
 
-## Context
-
-The BRD describes "Intern Flow" — an enterprise-scale unpaid internship automation platform with multi-region HA, immutable audit, microservices-friendly bounded contexts, etc. (see [Architecture_Analysis.md](./Architecture_Analysis.md) for the full enterprise design).
-
-**This plan is different.** The user is building a hackathon submission that will demonstrate the full happy path of the BRD to ~200 users in a 2–4 week build window, using a **single deployable** built with **FastAPI + React + Postgres on Azure**. The intent is to ship a credible, demoable end-to-end product covering referral → onboarding → access → closure → certificate, with **real integrations** (Gmail, Google Gemini API, DocuSign sandbox, Microsoft Graph for AD), and to drop every enterprise concern (multi-region, read replicas, Service Bus, etc.) that adds setup time without demo value.
-
-The outcome should be a single repo, a single container, and a single Azure App Service running the whole product — and a 5-minute demo flow that walks judges from a referrer's first click to a candidate's signed certificate.
+> **Based on BRD:** Intern Flow — Internship Program Automation (Unpaid Internships)
+> **Architecture:** Single Frontend (React + TypeScript) · Modular Monolith (Python FastAPI)
+> **Document Status:** Final — All specs confirmed
+> **Last Updated:** V2.0
 
 ---
 
-## Locked decisions (from clarification)
+## Confirmed Technology Stack
 
-| Decision | Choice |
-|---|---|
-| Timeline | **2–4 weeks** |
-| Deployment shape | **FastAPI (API) + React SPA bundled into one container, one Azure App Service** |
-| Cloud | **Azure** for app infra (App Service for Containers + Azure DB for PostgreSQL Flexible Server + Blob + Key Vault) |
-| AI vendor | **Google Gemini API** via Google AI Studio (cross-cloud — independent of Azure infra) |
-| Resume parsing | **Real** — Google Gemini (`gemini-2.0-flash`) — native multimodal, reads PDFs directly |
-| Email | **Real** — Gmail API (OAuth2) |
-| E-sign | **Real** — DocuSign developer sandbox |
-| AD provisioning | **Real** — Microsoft Graph API against a test Entra tenant |
-| AI ambition | **AI is the primary interaction modality, not a sprinkle** — target ≥ 70% of user-facing capabilities have AI in the loop |
-
----
-
-## AI footprint (target ≥ 70%)
-
-The app exposes ~26 user-facing capabilities. **20 of them have AI in the loop = ~77%.** AI is the *interaction modality* for most of them, not a hidden helper. Capabilities are listed in the "How AI is in the loop" column; "—" means pure CRUD/integration.
-
-| # | Capability | How AI is in the loop | Model |
-|---|---|---|---|
-| 1 | Login | — | — |
-| 2 | **Referral via classic form** | Resume parse → prefill, with confidence + override | `gemini-2.0-flash` (JSON mode) |
-| 3 | **Referral via conversational intake** | Multi-turn chat (optional voice via Web Speech API) gathers fields, calls `submit_referral` tool | `gemini-2.0-flash` + tools |
-| 4 | **Eligibility & readiness validator** | Cross-reads referrer narrative + parsed fields, flags concerns ("declared in-person but candidate based abroad") | `gemini-2.0-flash` |
-| 5 | **Smart form validator** (referral + joining) | Holistic semantic checks — phone country code vs. address, gov-ID format vs. nationality, cross-field consistency | `gemini-2.0-flash` |
-| 6 | **Hybrid duplicate detection** | Deterministic rules (email/phone/name fuzzy) + cosine similarity over candidate fingerprint embeddings | `text-embedding-004` + `rapidfuzz` |
-| 7 | HR review queue (inbox CRUD) | — | — |
-| 8 | **Personalized communications** (every outbound email except legal) | LLM drafts contextual body using template skeleton + role-specific tone; HR approves drafts > sensitive | `gemini-2.0-flash` |
-| 9 | **Project scope analyzer** | Analyzes mentor's project overview vs. candidate skills + duration; suggests learning objectives; warns on scope-vs-duration mismatch | `gemini-2.0-flash` |
-| 10 | Joining form draft + magic-link auth | — | — |
-| 11 | **Attachment intelligence** | Extracts & cross-validates gov-ID and transcript fields from uploaded docs vs. declared values — Gemini reads PDFs/images natively, no separate OCR service | `gemini-2.0-flash` (native multimodal) |
-| 12 | NDA via DocuSign | — | — |
-| 13 | **NDA plain-language summary** | LLM produces candidate-friendly summary of NDA obligations, shown alongside legal doc | `gemini-2.0-flash` |
-| 14 | AD provisioning | — | — |
-| 15 | **Mentor dossier with personalized welcome brief** | LLM drafts a 1-paragraph mentor brief from candidate background + project | `gemini-2.0-flash` |
-| 16 | Lifecycle events (start/extend/close) | — | — |
-| 17 | **SLA risk prediction with rationale** | Heuristic baseline filters at-risk items; LLM produces risk score, predicted breach time, root-cause narrative, recommended action | Heuristic + `gemini-2.0-flash` |
-| 18 | **Anomaly detection on audit stream** | Periodic LLM pass over recent audit events flags unusual patterns ("8 referrals from one referrer in a week") | `gemini-2.0-flash` |
-| 19 | **Weekly executive digest agent** | Autonomous job composes Program Owner narrative report (volume, breaches, root causes, recommendations) | `gemini-2.0-flash` |
-| 20 | **Personalized certificate text** | LLM-drafted achievements paragraph baked into certificate PDF; mentor reviews before issuance | `gemini-2.0-flash` |
-| 21 | **Agentic FAQ chatbot** (RAG + tools) | RAG citations + function-calling tools to take actions: `get_my_pending_tasks`, `get_referral_status`, `extend_internship`, `request_nda_resend`, `escalate_sla_breach`, `submit_referral` | `gemini-2.0-flash` + `text-embedding-004` + tools |
-| 22 | Audit log viewer / email-template admin | — | — |
-| 23 | **Mentor-candidate matchmaking** | LLM scores available mentors against candidate skills + project + mentor workload, returns ranked top-3 with rationale | `gemini-2.0-flash` |
-| 24 | **Multilingual interaction** (chatbot, intake, drafts, summaries) | Detect input language; respond in same language; UI strings AI-translated at build time for 8 locales | `gemini-2.0-flash` |
-| 25 | **AI alt-text + WCAG audit** | Caption uploaded images; LLM scans rendered HTML for accessibility issues, returns fixes | `gemini-2.0-flash` (native vision — no Document Intelligence needed) |
-| 26 | Audit log / template admin (already counted as #22) | — | — |
-
-**Net AI ratio: 20 / 26 = ~77%** of user-facing capabilities. Of those, **6 are agentic** (LLM chooses actions or tools, not just generates text): conversational intake, agentic chatbot, SLA prediction with action recommendation, anomaly detection, weekly digest, attachment intelligence. The existing #6 dedup is enhanced by continuous re-embedding, and #21 chatbot is enhanced by an LLM reranker (top-20 → top-5).
-
----
-
-## Hackathon scope
-
-### IN — must demo
-1. **Auth & roles** — JWT login with seeded users for the 6 roles (Referrer, Candidate, Mentor, HR, IT, Program Owner).
-2. **Referral intake** — Referrer uploads resume → AI parses → form prefilled → eligibility flags → submit.
-3. **HR review queue** — HR sees inbox, approves, kicks off Non-Worker ID + Joining Form invite (Gmail).
-4. **Joining form** — Candidate completes via magic-link, attachments to Blob, HR locks it.
-5. **NDA** — DocuSign sandbox envelope, candidate signs, webhook flips status.
-6. **AD provisioning** — Microsoft Graph creates user in test Entra tenant, credentials emailed.
-7. **Mentor dossier** — Mentor sees intern profile + project once NDA signed.
-8. **Lifecycle** — Start confirmation, optional extension, closure trigger.
-9. **Closure** — Auto AD-disable via Graph; certificate generated as PDF (WeasyPrint), emailed.
-10. **Dashboard** — Program Owner view: stage counts, SLA breaches, average cycle time.
-11. **Audit log** — append-only table, viewable per entity.
-12. **Notification engine** — event-driven Gmail sends with templated bodies + 3-strike reminders via APScheduler.
-13. **Agentic FAQ chatbot** — RAG over a curated FAQ corpus stored in Postgres via **pgvector**, plus **function-calling tools** so the bot can take actions on behalf of the user (status lookups, internship extension, NDA resend, SLA escalation, full referral submission). Role-aware retrieval and tool-permission gates. Floating drawer widget on every page.
-14. **Full duplicate-detection ML** — hybrid: deterministic rules (email exact, phone E.164, name fuzzy via `rapidfuzz`) **plus** semantic similarity via `text-embedding-004` over a candidate fingerprint. Stored in pgvector; produces `dedup_score` + band (LIKELY / POSSIBLE / UNIQUE) + HR review screen.
-15. **Conversational referral intake (alt. flow)** — instead of the form, referrer can click "Talk to AI" → multi-turn chat (text or voice via browser-native Web Speech API) → LLM gathers required fields → calls `submit_referral` tool. Same validation pipeline runs on submit.
-16. **Eligibility & readiness validator** — LLM checks unpaid consent, in-person readiness, location alignment against the narrative + parsed resume; flags concerns before HR review.
-17. **Smart form validator** — semantic cross-field checks on referral + joining forms (phone country vs. address, gov-ID format vs. nationality, education dates internally consistent).
-18. **Project scope analyzer** — analyzes mentor's project text vs. candidate skills + planned duration; suggests measurable learning objectives; warns on scope-vs-duration mismatch.
-19. **NDA plain-language summary** — LLM renders a candidate-friendly summary alongside the legal NDA so candidates actually read it.
-20. **Mentor dossier brief** — LLM drafts a 1-paragraph welcome brief for the mentor based on candidate background + project on dossier load.
-21. **Personalized certificate text** — LLM drafts an achievements paragraph embedded in the certificate PDF; mentor reviews before issuance.
-22. **Attachment intelligence** — Gemini's native multimodal vision extracts fields from uploaded transcripts/IDs (PDF or image) and cross-validates against declared values — no separate OCR/Document Intelligence service needed.
-23. **SLA risk prediction with rationale** — see expanded design below.
-24. **Anomaly detection** — periodic LLM pass on the audit stream flags unusual patterns (e.g., one referrer spiking, repeat extensions by same mentor).
-25. **Weekly executive digest agent** — autonomous Sunday-night job composes a Program Owner narrative report and emails it.
-26. **Personalized communications** — every outbound email (except the legal NDA itself) gets LLM-personalized body using a template skeleton; sensitive sends require HR approval before going out.
-27. **Mentor-candidate matchmaking** — when referrer leaves mentor blank (or asks for help), AI scores available mentors and recommends top-3.
-28. **Multilingual interaction** — chatbot, conversational intake, validators, drafts, NDA summary all auto-detect language and respond in kind; UI strings AI-translated for 8 locales (en, hi, ta, te, kn, ml, es, fr).
-29. **AI alt-text + WCAG audit** — caption uploaded images; CI + admin panel run an LLM accessibility audit on key pages.
-30. **Reranker on RAG retrieval** — pgvector top-20 → LLM rerank to top-5 (chatbot quality boost).
-31. **Continuous candidate re-embedding** — on candidate row update, refresh fingerprint embedding so dedup stays current.
-
-### OUT — explicitly cut for hackathon
-- Multi-region / HA / DR / read replicas
-- Service Bus / Kafka — replaced by in-process APScheduler + FastAPI `BackgroundTasks`
-- Always-Encrypted PII columns — TLS + bcrypt only
-- Full WCAG 2.1 AA audit (hit basic semantic HTML + keyboard nav)
-- AKS / Container Apps / blue-green slots — App Service single slot is fine
-
----
-
-## Architecture (single deployable)
-
-```
-┌───────────────────────────────────────────────┐
-│         Azure App Service (1 container)       │
-│  ┌──────────────────────────────────────┐     │
-│  │  FastAPI (uvicorn)                   │     │
-│  │   ├─ /api/*    JSON endpoints        │     │
-│  │   ├─ /static   React build (Vite)    │     │
-│  │   └─ /         index.html (SPA)      │     │
-│  │  APScheduler runs in same process    │     │
-│  └──────────────────────────────────────┘     │
-└──────┬──────────────┬────────────────┬────────┘
-       │              │                │
-   Postgres      Google Gemini    Gmail/DocuSign/Graph
-   Flex Server   (gemini-2.0-flash    (external APIs)
-                  + text-embedding-004)
-       │
-   Blob Storage (resumes, NDAs, certs)
-```
-
-App infrastructure is on Azure; AI is on Google Cloud (AI Studio API). Cross-cloud is a non-issue here — Gemini is just an HTTPS API call from the FastAPI container.
-
-**Key simplifications vs. enterprise design:**
-- Workflow orchestration = a `WorkflowService` class with a state-machine table (no Service Bus).
-- SLA timers = APScheduler in-process job that wakes every 5 minutes and scans `scheduled_jobs` table.
-- Async fan-out (e.g., "submit referral → email + audit + queue HR task") = `BackgroundTasks` in the request handler.
-
----
-
-## Repository layout (single repo, single deploy)
-
-```
-/intern-flow
-├── backend/
-│   ├── app/
-│   │   ├── api/              # FastAPI routers per module
-│   │   │   ├── referrals.py
-│   │   │   ├── joining_forms.py
-│   │   │   ├── nda.py
-│   │   │   ├── access.py
-│   │   │   ├── internships.py
-│   │   │   ├── certificates.py
-│   │   │   ├── dashboards.py
-│   │   │   ├── audit.py
-│   │   │   ├── auth.py
-│   │   │   └── webhooks.py   # docusign callbacks
-│   │   ├── models/           # SQLAlchemy ORM
-│   │   ├── schemas/          # Pydantic DTOs
-│   │   ├── services/         # business logic
-│   │   │   ├── workflow.py   # state machine
-│   │   │   ├── referral_service.py
-│   │   │   ├── notification_service.py
-│   │   │   ├── audit_service.py
-│   │   │   └── certificate_service.py
-│   │   ├── integrations/
-│   │   │   ├── gemini.py         # LLM, embeddings, vision (PDF/image), tools
-│   │   │   ├── gmail.py          # OAuth2 + send
-│   │   │   ├── docusign.py       # envelope create + webhook verify
-│   │   │   ├── ms_graph.py       # AD user create/disable
-│   │   │   └── blob.py           # azure-storage-blob
-│   │   ├── core/
-│   │   │   ├── config.py         # pydantic-settings
-│   │   │   ├── security.py       # JWT + bcrypt
-│   │   │   ├── deps.py           # FastAPI dependencies
-│   │   │   ├── scheduler.py      # APScheduler bootstrap
-│   │   │   └── rbac.py           # role policy decorators
-│   │   ├── db.py                 # SQLAlchemy engine + session
-│   │   └── main.py               # FastAPI app, mounts /static
-│   ├── alembic/                  # migrations
-│   ├── tests/
-│   ├── pyproject.toml            # Poetry or uv
-│   └── Dockerfile
-├── frontend/
-│   ├── src/
-│   │   ├── pages/
-│   │   │   ├── ReferralNew.tsx
-│   │   │   ├── ReferralList.tsx
-│   │   │   ├── JoiningForm.tsx
-│   │   │   ├── HrInbox.tsx
-│   │   │   ├── MentorDossier.tsx
-│   │   │   ├── Dashboard.tsx
-│   │   │   └── Login.tsx
-│   │   ├── components/           # shared UI
-│   │   ├── hooks/                # useApi, useAuth
-│   │   ├── api/client.ts         # axios + JWT
-│   │   ├── App.tsx
-│   │   └── main.tsx
-│   ├── package.json
-│   └── vite.config.ts
-├── docker-compose.yml            # local: api + postgres + adminer
-├── .github/workflows/deploy.yml  # build → ACR → App Service
-├── seed.py                       # seed roles, templates, demo users
-└── README.md                     # demo script + setup
-```
-
-**Single-container build:** `Dockerfile` does a multi-stage build — stage 1 builds React (`npm run build`), stage 2 builds Python wheel and copies the React `dist/` into `/app/static`. FastAPI mounts `StaticFiles(directory="static", html=True)` and falls through to `index.html` for client-routed paths.
-
----
-
-## Tech stack (final, hackathon-tuned)
-
-| Layer | Choice | Notes |
+| Layer | Technology | Justification |
 |---|---|---|
-| Backend | **Python 3.12 + FastAPI 0.115 + uvicorn** | Async, auto OpenAPI docs (great for demo at `/docs`) |
-| ORM / migrations | **SQLAlchemy 2.0 + Alembic** | |
-| Validation | **Pydantic v2** | |
-| Frontend | **React 18 + TypeScript + Vite** | Vite = fast dev + tiny prod bundle |
-| UI kit | **Mantine** | Accessible primitives out of the box; Drawer ideal for chat widget |
-| HTTP client | **axios** with JWT interceptor | |
-| State | **Zustand** for auth/UI state, **TanStack Query** for server state | Avoid Redux for this size |
-| Database | **Azure Database for PostgreSQL — Flexible Server (B1ms)** | ~$15/mo |
-| Auth | **JWT** (`python-jose`) + **bcrypt** (`passlib`) seeded users | No Entra ID SSO for app login — keeps demo simple. Entra used only as the *target* tenant for AD provisioning |
-| AI (LLM) | **Google Gemini `gemini-2.0-flash`** via Google AI Studio API | One API key shared by all AI surfaces; JSON mode (`responseSchema`) + function-calling; 1M-token context window helps the digest/anomaly agents |
-| AI (embeddings) | **Google `text-embedding-004`** (768-dim) | Shared by FAQ RAG and candidate dedup; free tier covers hackathon volume |
-| AI (tool-calling) | Gemini `function_declarations` on `gemini-2.0-flash` | Powers agentic chatbot + conversational intake |
-| AI (multimodal vision) | **`gemini-2.0-flash` native vision** (PDF + image input directly) | Replaces Azure AI Document Intelligence — handles resumes, transcripts, gov-IDs, profile pics in a single API call. One less integration to wire |
-| Voice input | **Browser-native Web Speech API** | Free, zero infra; adequate for hackathon demo |
-| Vector store | **pgvector** extension on the same Postgres Flexible Server | No new infra; cosine search via `<=>`; HNSW index |
-| OCR (resume) | **`gemini-2.0-flash` vision** (Gemini reads PDFs natively) with `pdfplumber` as a tiny pre-pass to extract plain text fast for the simple cases | Skips the OCR/parser dance — Gemini handles scanned PDFs and text PDFs the same way |
-| Email | **Gmail API** via `google-api-python-client` with OAuth2 refresh-token | |
-| E-sign | **DocuSign Developer Sandbox** via `docusign-esign` SDK + webhook | |
-| AD | **Microsoft Graph SDK for Python** (`msgraph-sdk`) using **client credentials flow** against test Entra tenant | |
-| PDF generation | **WeasyPrint** for certificates from HTML/CSS template | |
-| Background jobs | **APScheduler** (in-process, persistent jobstore in Postgres) + FastAPI `BackgroundTasks` | |
-| Object storage | **Azure Blob Storage** (one container per env) | |
-| Secrets | **Azure Key Vault** + managed identity in App Service | Local dev uses `.env` |
-| Logging | **Application Insights** via `opencensus-ext-azure` | |
-| CI/CD | **GitHub Actions** → ACR → App Service deploy slot | |
+| Frontend | React 18 + TypeScript + TanStack Query | Type-safe, industry standard, excellent async state |
+| UI Library | shadcn/ui + Tailwind CSS | Accessible by default, composable, WCAG 2.1 AA ready |
+| Backend | Python 3.12 + FastAPI | Async-native, fast, AI/ML ecosystem fit, team scale appropriate |
+| Database | Azure Database for PostgreSQL (Flexible Server) | Managed, ACID, JSONB support, row-level security |
+| ORM | SQLAlchemy 2.0 + Alembic | Async ORM, typed models, migration management |
+| AI/LLM | Azure OpenAI Service (GPT-4o) | Data stays within Azure boundary, unified billing, enterprise SLA |
+| SSO & Identity | Microsoft Azure AD (OIDC) + MSAL | Native SSO for employees, Graph API for AD provisioning |
+| Email | Google Workspace (Gmail API via OAuth2) | Organizational email, deliverability, threading support |
+| E-sign | OpenSign (self-hosted Docker) | Open-source, REST API, webhook support, zero licensing cost |
+| File Storage | Azure Blob Storage | Managed, SAS token access, lifecycle policies, CDN-ready |
+| Deployment | Azure App Service (Linux) + Azure Container Registry | PaaS, auto-scaling, integrated with Azure AD |
+| Background Jobs | APScheduler (FastAPI-native) + Azure Service Bus (dead-letter) | Lightweight scheduler; Service Bus for reliable job queuing |
+| Caching | Azure Cache for Redis | Session store, AI result caching, rate limiting |
+| Monitoring | Azure Monitor + Application Insights | Full observability, alert rules, query analytics |
+| E-sign Infra | OpenSign on Azure Container Instance | Isolated, same Azure network, REST API accessible internally |
 
 ---
 
-## Data model (hackathon-tuned)
+## Table of Contents
 
-Drop temporal tables, Always Encrypted, RLS — keep only what fits in Postgres flat.
+1. [Problem Framing](#1-problem-framing)
+2. [Role Modeling](#2-role-modeling)
+3. [Business Rules — Complete Specification](#3-business-rules--complete-specification)
+4. [Workflow Reasoning](#4-workflow-reasoning)
+5. [Auto-Rejection State Machines](#5-auto-rejection-state-machines)
+6. [UI/UX Thinking](#6-uiux-thinking)
+7. [AI System Design — 10 Touchpoints](#7-ai-system-design--10-touchpoints)
+8. [System Architecture — Modular Monolith](#8-system-architecture--modular-monolith)
+9. [Data Modeling](#9-data-modeling)
+10. [Failure Scenarios](#10-failure-scenarios)
+11. [Metrics & Feedback Loops](#11-metrics--feedback-loops)
+12. [Security & Ethics](#12-security--ethics)
+13. [Future Evolution](#13-future-evolution)
+14. [Project Folder Structure](#14-project-folder-structure)
+15. [Assumptions & Open Questions](#15-assumptions--open-questions)
+
+---
+
+## 1. Problem Framing
+
+### 1.1 Core Problem
+
+IT organizations running unpaid internship programs face a fundamental contradiction: interns are temporary and low-overhead, but their onboarding touches at least 6 departments and requires legal, identity, and physical access coordination — all currently done via email and chat.
+
+**The result:**
+
+| Pain Point | Business Impact |
+|---|---|
+| No centralized referral intake | Duplicates, lost referrals, no audit trail |
+| Manual mentor assignment | Bottlenecks, no SLA, no fallback when mentor ignores |
+| NDA managed via email | Compliance risk; impossible to prove pre-start signing |
+| AD provisioning ad-hoc | Interns arrive on Day 1 with no system access |
+| Zero visibility for leadership | Cannot track cycle time, SLA health, or program quality |
+
+### 1.2 Why Modular Monolith (Python FastAPI)
+
+**FastAPI chosen because:**
+- Async-native (handles 500 concurrent users with minimal resources)
+- First-class Azure OpenAI SDK support
+- Python's NLP/ML ecosystem is best-in-class
+- 3-person team can own a single codebase efficiently
+- No network overhead between internal modules
+- Shared PostgreSQL transaction boundaries — ACID guarantees across the entire workflow
+
+**Monolith over microservices because:**
+- Distributed transactions (NDA + ID + AD must all succeed or roll back) are trivially solved in a monolith
+- 3-person team cannot operate 8+ independently deployed services
+- Internal tool with 500 concurrent users does not need horizontal service scaling at launch
+- Transactional Outbox pattern is pre-designed for future extraction if needed
+
+---
+
+## 2. Role Modeling
+
+### 2.1 Actor Taxonomy
+
+```
+NexHire Actors
+├── Internal (Azure AD SSO)
+│   ├── Referrer (Employee)     → Submits referrals, selects mentor, tracks status
+│   ├── Mentor (Employee)       → Accepts/rejects mentoring, guides intern lifecycle
+│   └── Program Owner           → Governance, SLA oversight, configuration, reporting
+│
+├── External (Magic Link)
+│   └── Candidate (Intern)      → Completes joining form, signs NDA
+│
+├── Operational (Azure AD SSO)
+│   ├── HR                      → Reviews referrals, issues Non-Worker ID, manages NDA, letters, closure
+│   ├── Admin / Security        → Badge and site access coordination
+│   └── IT / AD Team            → AD account provisioning and deactivation via Microsoft Graph
+│
+└── System Actors (Automated)
+    ├── AI Engine               → All 10 AI touchpoints (Azure OpenAI)
+    ├── Scheduler               → APScheduler jobs for SLA clocks, reminders, auto-rejections
+    ├── Notification Service    → Gmail API-based email delivery
+    └── OpenSign Webhook        → NDA signing events (signed / declined / expired)
+```
+
+### 2.2 RBAC Permission Matrix
+
+| Action | Referrer | Mentor | Candidate | HR | IT/AD | Admin | Program Owner |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| Submit referral | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | ✅ |
+| Select / change mentor | ✅ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ |
+| Accept / reject mentoring | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ | ❌ |
+| View own referrals only | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | ✅ |
+| View all referrals | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ |
+| Complete joining form | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ | ❌ |
+| Lock joining form | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
+| Issue Non-Worker ID | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
+| Provision AD account | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ |
+| Manage badge / site access | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ | ❌ |
+| Approve / reject referral | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ |
+| Override AI decision | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ |
+| Generate certificate | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ❌ |
+| View SLA dashboard | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ |
+| View audit trail | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ |
+| System configuration | ❌ | ❌ | ❌ | ❌ | ❌ | ❌ | ✅ |
+| Query AI chatbot | ❌ | ❌ | ❌ | ✅ | ❌ | ❌ | ✅ |
+
+### 2.3 Authentication Strategy
+
+**Employees (Referrer, Mentor, HR, IT, Admin, Program Owner):**
+- Azure AD OIDC SSO via MSAL
+- JWT issued by NexHire on successful SSO token exchange (RS256, 8h expiry)
+- Role claims stored in NexHire DB (not in Azure AD groups) — decoupled
+- Refresh token rotation: 24h, stored encrypted in Redis
+
+**Candidates (External):**
+- No password account — magic link via Gmail API to referral-submitted email
+- Magic link: single-use, 72h expiry, bcrypt-hashed in DB
+- Candidate JWT scoped strictly to their own intern record
+- Account archived post-closure (not deleted — retention policy)
+
+---
+
+## 3. Business Rules — Complete Specification
+
+### 3.1 Eligibility Rules (Hard Blocks — System Enforced)
+
+```
+RULE-E1: Year of Study Restriction
+  ALLOWED:   2nd year, 3rd year, 4th year students ONLY
+  BLOCKED:   1st year students
+  BLOCKED:   Graduated students (graduation_year ≤ current_year)
+  ENFORCEMENT: Referral form validator (backend) + UI field validation
+  ERROR MSG: "Only students currently in their 2nd, 3rd, or 4th year are eligible."
+
+RULE-E2: College Cap per Referrer
+  LIMIT: Max 2 active referrals per referrer from the same college
+  SCOPE: Active = any status except REJECTED, CLOSED, TERMINATED
+  ENFORCEMENT: Backend pre-submission check against referral_college_count view
+  ERROR MSG: "You have already referred 2 students from [College Name].
+              This limit has been reached for this cycle."
+  AI ASSIST: Warning shown during form fill before submission attempt
+
+RULE-E3: Referrer ≠ Mentor
+  BLOCKED: Same employee cannot be both referrer and mentor for the same intern
+  ENFORCEMENT: Referral form validator (server-side hard block)
+
+RULE-E4: Unpaid Consent Required
+  BLOCKED: Submission if candidate has not confirmed unpaid internship consent
+  ENFORCEMENT: Boolean field; backend blocks if false
+
+RULE-E5: In-Person Readiness Required
+  BLOCKED: Submission if candidate has not confirmed in-person availability
+  ENFORCEMENT: Boolean field; backend blocks if false
+
+RULE-E6: Mentor Capacity
+  BLOCKED: Mentor selection if mentor.active_mentee_count >= 4
+  ENFORCEMENT: Real-time check during mentor selection in referral form
+  UI: Mentor picker shows capacity badge (e.g., "2/4 slots used", "FULL")
+  AI ASSIST: Full mentors excluded from AI mentor recommendations automatically
+```
+
+### 3.2 Mentor Assignment Rules
+
+```
+RULE-M1: Mentor Must Explicitly Accept
+  After referral submission → mentor receives assignment request email
+  Mentor must click Accept or Reject within 3 business days
+  Status held at: MENTOR_PENDING until response received
+
+RULE-M2: Mentor No-Response Auto-Rejection (3-day rule)
+  Trigger: mentor has not responded in 3 calendar days
+  Action:
+    1. Mentor assignment status → MENTOR_TIMED_OUT
+    2. Referral status → MENTOR_PENDING (awaiting new selection)
+    3. Notify referrer: "[Mentor Name] did not respond. Please select a new mentor."
+    4. AI Mentor Suggestion engine runs immediately with updated recommendations
+    5. Attempt counter incremented: mentor_attempt_count += 1
+
+RULE-M3: Maximum Mentor Re-selection Attempts
+  LIMIT: 3 total mentor attempts per referral
+  After 3rd failure (rejection OR timeout):
+    1. Referral status → CANDIDATE_REJECTED
+    2. Rejection reason logged: "MAX_MENTOR_ATTEMPTS_EXCEEDED"
+    3. Notify referrer: "Unable to assign a mentor after 3 attempts. Referral closed."
+    4. Notify candidate: "Unfortunately, your referral could not proceed at this time."
+    5. Record archived with full audit trail
+
+RULE-M4: Mentor Rejection Handling
+  Mentor rejection requires mandatory rejection_reason field
+  On rejection:
+    1. Referral status → MENTOR_REJECTED → MENTOR_PENDING
+    2. Rejection captured: {reason, timestamp, mentor_id}
+    3. Notify referrer immediately with rejection reason
+    4. AI Mentor Suggestions regenerated excluding rejected mentor
+    5. Attempt counter incremented
+
+STATE MACHINE:
+  MENTOR_PENDING
+    → [Accept]       → MENTOR_ACCEPTED → (continue workflow)
+    → [Reject]       → MENTOR_REJECTED → MENTOR_PENDING (if attempts < 3)
+    → [Timeout 3d]   → MENTOR_TIMED_OUT → MENTOR_PENDING (if attempts < 3)
+    → [3rd failure]  → CANDIDATE_REJECTED (terminal)
+```
+
+### 3.3 NDA Signing Rules
+
+```
+RULE-N1: NDA Must Be Signed Before Start Date (Hard Block)
+  Internship ACTIVE transition blocked if nda.status ≠ SIGNED
+  No exceptions; no manual override (by design)
+
+RULE-N2: NDA Reminder Schedule
+  Day 1 (T+24h): Reminder email — "Please sign your NDA to proceed"
+  Day 2 (T+48h): Urgent reminder — "Action required: NDA signing deadline approaching"
+  Day 3 (T+72h): Final warning — "You have 48 hours remaining. After Day 5, your referral will be closed."
+  Day 5 (T+120h): AUTO-REJECT triggered
+
+RULE-N3: NDA Auto-Rejection (Day 5)
+  Trigger: nda.status ≠ SIGNED AND nda.issued_at < NOW() - 5 days
+  Action:
+    1. Referral status → NDA_TIMEOUT_REJECTED
+    2. NDA status → EXPIRED
+    3. Notify referrer: "Candidate did not sign NDA within 5 days. Referral closed."
+    4. Notify candidate: "Your referral has been closed due to NDA timeout. Contact HR to appeal."
+    5. Audit event logged with reason: NDA_AUTO_REJECTED
+    6. Record archived (not deleted)
+
+RULE-N4: NDA Decline Handling
+  If candidate explicitly declines NDA via OpenSign:
+    1. Webhook received → immediate rejection
+    2. Referral status → NDA_DECLINED_REJECTED
+    3. Notify referrer and HR immediately
+    4. No waiting period — terminal state
+```
+
+### 3.4 SLA Rules
+
+| Activity | SLA | Warning | Escalation |
+|---|---|---|---|
+| HR referral review | 2 business days | T+1 day | T+2 days → Program Owner |
+| Mentor response | 3 calendar days | T+2 days | T+3 days → auto-timeout |
+| Non-Worker ID creation | 1 business day | T+4 hours | T+8 hours → Program Owner |
+| NDA signing | 5 calendar days | T+24h, T+48h, T+72h | T+5 days → auto-reject |
+| Badge / site access | 2 business days before start | T-3 days | T-4 days → Admin Manager |
+| AD account provisioning | 2 business days before start | T-3 days | T-4 days → IT Manager |
+| AD deactivation post-end | 24 hours | T+12 hours | T+18 hours → Program Owner |
+| Certificate issuance | 5 business days post-request | T+3 days | T+5 days → HR Manager |
+
+---
+
+## 4. Workflow Reasoning
+
+### 4.1 Master Workflow (End-to-End)
+
+```
+═══════════════════════════════════════════════════════════════════
+PHASE 1: REFERRAL INTAKE
+═══════════════════════════════════════════════════════════════════
+
+Step 1: Employee logs in via Azure AD SSO
+        └── Role resolved from NexHire RBAC table
+
+Step 2: Employee fills Internship Referral Form
+        ├── Uploads candidate resume
+        │   └── AI-1: Resume Deep Analyzer runs
+        │         ├── Extracts: name, email, phone, education, skills
+        │         ├── Generates: internship_readiness_score, suggested_project_tracks
+        │         ├── Flags: red_flags[], recommended_mentor_questions[]
+        │         └── Prefills form with confidence scores per field
+        │
+        ├── Employee selects year of study
+        │   └── RULE-E1: 1st year / graduated → BLOCKED immediately
+        │
+        ├── Employee selects college
+        │   └── RULE-E2: College cap check → WARNING if 1/2 used, BLOCK if 2/2 used
+        │
+        ├── Employee selects mentor from picker
+        │   ├── RULE-E3: Referrer ≠ Mentor enforced
+        │   ├── RULE-M-CAP: Full mentors (4/4) shown as FULL, unselectable
+        │   └── AI-2: Mentor Match Engine suggests top 3 mentors with radar chart
+        │
+        ├── AI-3: Eligibility & Risk Profiler runs
+        │   └── Outputs: risk_score, risk_factors[], college_cap_status
+        │
+        └── AI-4: Duplicate Detection runs
+            ├── Multi-signal: email + phone + name fuzzy match
+            └── Flags if candidate found in last 24 months
+
+Step 3: Referral submitted → status: SUBMITTED
+        ├── Timestamps, referrer_id, mentor_id logged immutably
+        ├── Confirmation email → Referrer (AI-drafted)
+        └── Assignment request email → Mentor (AI-drafted with candidate summary)
+
+═══════════════════════════════════════════════════════════════════
+PHASE 2: MENTOR ASSIGNMENT
+═══════════════════════════════════════════════════════════════════
+
+Step 4: Mentor receives assignment request
+        ├── Email contains: candidate summary, project, internship dates
+        ├── Two action buttons: [Accept Mentoring] [Reject Mentoring]
+        ├── SLA clock starts: 3 calendar days
+        └── Mentor capacity pre-validated (system won't allow over-assignment)
+
+Step 4A: MENTOR ACCEPTS
+        ├── Referral status → MENTOR_ACCEPTED
+        ├── Mentor.active_mentee_count += 1
+        ├── Notify referrer: "Mentor [Name] has accepted!"
+        └── Proceed to Phase 3
+
+Step 4B: MENTOR REJECTS
+        ├── Rejection reason captured (mandatory)
+        ├── Referral status → MENTOR_REJECTED → MENTOR_PENDING
+        ├── attempt_count += 1
+        ├── Notify referrer with rejection reason
+        ├── AI-2: Re-runs mentor suggestions (excludes rejected mentor)
+        └── Employee selects new mentor (if attempt_count < 3)
+
+Step 4C: MENTOR TIMEOUT (3 days no response)
+        ├── APScheduler job fires
+        ├── Mentor status → MENTOR_TIMED_OUT
+        ├── Referral status → MENTOR_PENDING
+        ├── attempt_count += 1
+        ├── Notify referrer: "[Mentor] did not respond. Please select new mentor."
+        ├── AI-2: Regenerates suggestions
+        └── Employee selects new mentor (if attempt_count < 3)
+
+Step 4D: 3RD ATTEMPT FAILS (reject OR timeout)
+        ├── Referral status → CANDIDATE_REJECTED
+        ├── Reason: MAX_MENTOR_ATTEMPTS_EXCEEDED
+        ├── Notify referrer and candidate (AI-drafted empathetic emails)
+        └── Record archived → TERMINAL STATE
+
+═══════════════════════════════════════════════════════════════════
+PHASE 3: HR REVIEW & APPROVAL
+═══════════════════════════════════════════════════════════════════
+
+Step 5: HR receives referral notification
+        ├── AI-10: Workflow Auto-Router assigns to least-loaded HR member
+        ├── HR reviews: AI-parsed data, original resume, risk profile
+        ├── AI-3 output shown: risk score, flags, recommended questions
+        └── HR actions: Approve / Reject / Request Correction
+
+Step 6: On Approval
+        ├── Referral status → APPROVED
+        ├── Congratulations email → Candidate (AI-drafted, personalized)
+        ├── Email includes: mentor name, project title, expected start date
+        └── Magic link sent to candidate for joining form access
+
+═══════════════════════════════════════════════════════════════════
+PHASE 4: CANDIDATE ONBOARDING
+═══════════════════════════════════════════════════════════════════
+
+Step 7: Candidate accesses joining form via magic link
+        ├── AI-6: Joining Form Assistant active
+        │   ├── Detects institution name → auto-fills affiliated codes
+        │   ├── Reads uploaded ID proof → extracts DOB, ID number, name
+        │   ├── Cross-validates name vs referral form → flags mismatches
+        │   └── Contextual prompts per section
+        ├── Auto-save every 60 seconds (save-draft)
+        └── File uploads: photo, ID proof, education certificate
+
+Step 8: Candidate submits joining form
+        ├── HR notified (AI-drafted review task email)
+        └── Referral status → JOINING_FORM_SUBMITTED
+
+Step 9: HR reviews and locks joining form
+        ├── Lock = data verified
+        ├── Immutable lock event logged
+        ├── SLA clock starts for Non-Worker ID (T+0)
+        └── Referral status → JOINING_FORM_LOCKED
+
+Step 10: HR creates Non-Worker ID
+         ├── SLA: 1 business day
+         ├── Warning at T+4h, escalation to Program Owner at T+8h
+         └── Referral status → ID_ISSUED
+
+Step 11: NDA issued via OpenSign
+         ├── NDA PDF template pulled from Azure Blob Storage
+         ├── OpenSign API: create envelope → send to candidate email
+         ├── OpenSign webhook registered for: SIGNED / DECLINED / EXPIRED
+         ├── NDA reminder schedule starts (Day 1, Day 2, Day 3, Day 5 auto-reject)
+         └── Start date HARD BLOCKED until nda.status = SIGNED
+
+Step 11A: Candidate signs NDA
+         ├── OpenSign webhook → SIGNED event received
+         ├── Signed PDF retrieved → stored in Azure Blob Storage
+         ├── nda.status → SIGNED, signed_at = timestamp
+         └── Referral status → NDA_SIGNED
+
+Step 11B: NDA Day 5 Auto-Reject
+         ├── APScheduler job fires at T+120h
+         ├── Referral status → NDA_TIMEOUT_REJECTED
+         ├── Notify referrer + candidate (AI-drafted)
+         └── TERMINAL STATE
+
+Step 12: Offer / Confirmation letter generated
+         ├── AI-8 (adapted): Letter content generated from intern data
+         ├── HR reviews and sends
+         └── Copy archived to Azure Blob Storage
+
+═══════════════════════════════════════════════════════════════════
+PHASE 5: ACCESS PROVISIONING
+═══════════════════════════════════════════════════════════════════
+
+Step 13: Admin/Security task created (badge)
+         ├── AI-10: Auto-routed to available Admin member
+         ├── SLA: 2 business days before start
+         └── Completion logged with badge reference
+
+Step 14: IT/AD task created (account provisioning)
+         ├── Trigger: Non-Worker ID confirmed + start date T-2 days
+         ├── IT uses Microsoft Graph API to create AD account
+         ├── Credentials delivered to candidate via OTP magic link
+         ├── AD credentials NEVER stored in NexHire DB
+         └── IT marks task complete
+
+Step 15: Mentor receives full intern dossier
+         ├── AI-7 (adapted): Dossier compiled — photo, skills, project, timeline
+         ├── One secure link (SAS token, 24h expiry)
+         └── Mutual connect prompt (Teams deep link)
+
+Step 16: AI-7: Pre-Start Compliance Check fires at T-48h
+         ├── Checks all blockers: NDA, ID, AD, badge, offer letter
+         ├── Auto-escalates any red items immediately
+         └── Report sent to HR + Program Owner
+
+═══════════════════════════════════════════════════════════════════
+PHASE 6: INTERNSHIP EXECUTION
+═══════════════════════════════════════════════════════════════════
+
+Step 17: Mentor confirms intern started (Day 1 check-in)
+         ├── Referral status → ACTIVE
+         └── Internship duration clock begins
+
+Step 18: Mid-point check-in (AI-5 monitors SLA health continuously)
+         ├── AI-5: Bottleneck Predictor runs every 6 hours
+         └── Extension requests: Mentor + HR approval, new end date set
+
+═══════════════════════════════════════════════════════════════════
+PHASE 7: CLOSURE & CERTIFICATION
+═══════════════════════════════════════════════════════════════════
+
+Step 19: End-of-internship reminders
+         ├── T-7 days: Mentor + HR reminder (AI-drafted)
+         └── T-1 day: Final reminder
+
+Step 20: Closure workflow
+         ├── Mentor confirms completion (or early exit with reason)
+         ├── IT/AD: Graph API account deactivation task (SLA ≤ 24h)
+         ├── Admin/Security: badge deactivation task
+         ├── Certificate request form sent to candidate
+         └── Referral status → CLOSURE_PENDING
+
+Step 21: Certificate generation
+         ├── HR reviews certificate request
+         ├── AI-8: Certificate citation content generated
+         ├── PDF generated on letterhead template (Azure Blob)
+         ├── HR approves → signed PDF archived
+         ├── Delivery link sent to candidate
+         └── Referral status → CLOSED
+```
+
+---
+
+## 5. Auto-Rejection State Machines
+
+### 5.1 Mentor Assignment State Machine
+
+```
+                    ┌─────────────────┐
+                    │  MENTOR_PENDING  │◄──────────────────────┐
+                    └────────┬────────┘                        │
+                             │                                 │
+              ┌──────────────┼──────────────┐                  │
+              │              │              │                  │
+         [Accept]       [Reject]      [Timeout 3d]             │
+              │              │              │                  │
+              ▼              ▼              ▼                  │
+      MENTOR_ACCEPTED  MENTOR_REJECTED  MENTOR_TIMED_OUT       │
+              │              │              │                  │
+              │              └──────┬───────┘                  │
+              │                     │                          │
+              │            attempt_count += 1                  │
+              │                     │                          │
+              │              ┌──────▼──────┐                   │
+              │              │ attempts < 3?│                   │
+              │              └──────┬──────┘                   │
+              │                     │                          │
+              │              ┌──────┴──────┐                   │
+              │              │             │                   │
+              │            YES            NO                   │
+              │              │             │                   │
+              │              │             ▼                   │
+              │              │    CANDIDATE_REJECTED           │
+              │              │    (TERMINAL — audit logged)    │
+              │              │                                 │
+              │              └─────────────────────────────────┘
+              │                  Employee selects new mentor
+              │
+              ▼
+    Continue to HR Review Phase
+```
+
+### 5.2 NDA Signing State Machine
+
+```
+[NDA Issued via OpenSign]
+         │
+         ▼
+    NDA_PENDING
+         │
+    ┌────┴──────────────────────────────────────────┐
+    │                                               │
+[T+24h] Day 1 Reminder                    [Candidate Signs]
+[T+48h] Day 2 Urgent Reminder                      │
+[T+72h] Day 3 Final Warning                        ▼
+    │                                          NDA_SIGNED
+[T+120h] Auto-Reject Triggered                     │
+    │                                              ▼
+    ▼                                   Continue to Access Provisioning
+NDA_TIMEOUT_REJECTED
+(TERMINAL)
+    │
+    ├── Notify Referrer (AI-drafted)
+    ├── Notify Candidate (AI-drafted)
+    ├── Audit event: NDA_AUTO_REJECTED
+    └── Archive record
+
+    OR
+
+[Candidate Explicitly Declines via OpenSign]
+    │
+    ▼
+NDA_DECLINED_REJECTED
+(TERMINAL — immediate, no grace period)
+    │
+    ├── Webhook received from OpenSign
+    ├── Notify Referrer + HR immediately
+    └── Audit event: NDA_DECLINED
+```
+
+### 5.3 Master Referral Status Flow
+
+```
+DRAFT
+  └─► SUBMITTED
+        └─► MENTOR_PENDING
+              ├─► MENTOR_ACCEPTED
+              │     └─► HR_REVIEW
+              │           ├─► APPROVED
+              │           │     └─► JOINING_FORM_PENDING
+              │           │           └─► JOINING_FORM_SUBMITTED
+              │           │                 └─► JOINING_FORM_LOCKED
+              │           │                       └─► ID_PENDING
+              │           │                             └─► ID_ISSUED
+              │           │                                   └─► NDA_PENDING
+              │           │                                         ├─► NDA_SIGNED
+              │           │                                         │     └─► ACCESS_PENDING
+              │           │                                         │           └─► ACTIVE
+              │           │                                         │                 ├─► EXTENDED
+              │           │                                         │                 └─► CLOSURE_PENDING
+              │           │                                         │                       └─► CLOSED ✅
+              │           │                                         ├─► NDA_TIMEOUT_REJECTED ❌
+              │           │                                         └─► NDA_DECLINED_REJECTED ❌
+              │           └─► HR_REJECTED ❌
+              ├─► MENTOR_REJECTED → MENTOR_PENDING (attempt < 3)
+              ├─► MENTOR_TIMED_OUT → MENTOR_PENDING (attempt < 3)
+              └─► CANDIDATE_REJECTED ❌ (3 failed mentor attempts)
+```
+
+---
+
+## 6. UI/UX Thinking
+
+### 6.1 Screen Inventory (25 Screens)
+
+#### Auth (2)
+| # | Screen | Purpose |
+|---|---|---|
+| S1 | Azure AD SSO Redirect | Employee login via MSAL |
+| S2 | Magic Link Verification | Candidate accesses portal |
+
+#### Referrer Screens (5)
+| # | Screen | Purpose |
+|---|---|---|
+| S3 | My Dashboard | Referral pipeline, statuses, pending actions |
+| S4 | New Referral Form | Multi-step wizard with AI prefill + mentor picker |
+| S5 | Referral Detail & Timeline | Full status history, AI analysis, event log |
+| S6 | Edit Referral (pre-approval) | Correct before HR reviews |
+| S7 | Mentor Re-selection Panel | AI suggestions with radar chart after mentor failure |
+
+#### Candidate Screens (3)
+| # | Screen | Purpose |
+|---|---|---|
+| S8 | Welcome / Status Page | Current stage, "What happens next" panel |
+| S9 | Joining Form | Multi-section, AI-assisted, save-draft |
+| S10 | NDA Signing Page | Embedded OpenSign widget |
+
+#### HR Screens (7)
+| # | Screen | Purpose |
+|---|---|---|
+| S11 | HR Dashboard | All referrals, SLA breach alerts, AI bottleneck insights |
+| S12 | Referral Review Panel | AI analysis vs original resume, approve/reject |
+| S13 | Joining Form Review | Review submitted form, lock button |
+| S14 | Non-Worker ID Management | Issue ID, track SLA countdown |
+| S15 | NDA & Letters Management | NDA status, OpenSign status, offer letter generation |
+| S16 | Certificate Issuance | AI-generated citation, review, approve, archive |
+| S17 | AI Program Chatbot | Natural language queries on program data |
+
+#### Mentor Screens (3)
+| # | Screen | Purpose |
+|---|---|---|
+| S18 | Mentor Dashboard | My interns: active (n/4), upcoming, past |
+| S19 | Intern Dossier View | Full profile, AI-generated summary, task checklist |
+| S20 | Lifecycle Actions | Accept/reject mentoring, confirm start, request extension, confirm closure |
+
+#### IT/AD & Admin Screens (2)
+| # | Screen | Purpose |
+|---|---|---|
+| S21 | Task Queue (IT/AD) | Graph API provisioning tasks, SLA countdown |
+| S22 | Task Queue (Admin/Security) | Badge access tasks with start/end dates |
+
+#### Program Owner Screens (3)
+| # | Screen | Purpose |
+|---|---|---|
+| S23 | Executive Dashboard | SLA heartbeat, stage counts, cycle time, College Map |
+| S24 | SLA & Audit Report | Breach drill-down, full audit trail, export |
+| S25 | Configuration Panel | Templates, escalation matrix, NDA versions, role management |
+
+### 6.2 Key UX Design Decisions
+
+**AI Prefill Visual Treatment:**
+- Azure OpenAI-filled fields: amber tint + "AI Suggested" badge
+- Confidence < 75%: warning icon + "Please verify" tooltip
+- Human override tracked silently
+
+**Mentor Picker (S4):**
+```
+┌──────────────────────────────────────────────────────────┐
+│  Select Mentor                                           │
+│                                                          │
+│  🤖 AI Recommended                                       │
+│  ┌────────────────────────────────────────────────────┐  │
+│  │ Arjun Mehta          Match: 94%   Slots: 2/4  ✅  │  │
+│  │ ████████████████░░ Skills  ████████████░░░░ Avail  │  │
+│  │ Reason: "Best skill match, fast responder"         │  │
+│  └────────────────────────────────────────────────────┘  │
+│  ┌────────────────────────────────────────────────────┐  │
+│  │ Priya Nair           Match: 78%   Slots: 3/4  ✅  │  │
+│  └────────────────────────────────────────────────────┘  │
+│  ┌────────────────────────────────────────────────────┐  │
+│  │ Ravi Kumar           Match: 71%   Slots: 4/4  🔴  │  │
+│  │ MENTOR FULL — Cannot be selected                   │  │
+│  └────────────────────────────────────────────────────┘  │
+│  [Browse all mentors ▼]                                  │
+└──────────────────────────────────────────────────────────┘
+```
+
+**"What Happens Next" Panel (every screen):**
+Each role sees a contextual next-step panel — never left wondering what to do.
+
+**SLA Heartbeat Cards (S23):**
+Live pulsing cards per intern. Green → Amber → Red as SLA approaches breach. Visual urgency without data overload.
+
+**College Intelligence Map (S23 — Program Owner):**
+Bubble map of India with college locations. Bubble size = referral count. Color = completion rate. Completely unique visual no competing team will have.
+
+---
+
+## 7. AI System Design — 10 Touchpoints
+
+### AI Coverage Summary
+
+```
+🤖 AI-Driven (fully automated):    35%
+🤝 AI-Assisted (human reviews):    40%
+👤 Human-Only (judgment required): 25%
+
+Total AI Coverage: 75%
+```
+
+### AI-1: Resume Deep Analyzer
+
+**Trigger:** Resume file uploaded in referral form
+**Model:** Azure OpenAI GPT-4o (vision + text)
+**Why GPT-4o:** Handles varied resume formats including scanned PDFs via vision capability
+
+```python
+# Input
+{
+  "file_bytes": "<base64>",
+  "mime_type": "application/pdf"
+}
+
+# Azure OpenAI Prompt Strategy
+SYSTEM: """
+You are a resume analysis engine. Extract structured data and
+provide readiness assessment. Return ONLY valid JSON.
+"""
+USER: """
+Analyze this resume. Return:
+{
+  "candidate_name": {"value": "", "confidence": 0.0},
+  "email": {"value": "", "confidence": 0.0},
+  "phone": {"value": "", "confidence": 0.0},
+  "year_of_study": {"value": "", "confidence": 0.0},
+  "college": {"value": "", "confidence": 0.0},
+  "graduation_year": {"value": 0, "confidence": 0.0},
+  "education": [{"degree": "", "field": "", "institution": "", "year": 0}],
+  "skills": [],
+  "internship_readiness_score": 0,
+  "technical_depth": "",
+  "project_experience_quality": "",
+  "suggested_project_tracks": [],
+  "red_flags": [],
+  "recommended_mentor_questions": []
+}
+"""
+
+# Output stored in: ai_parse_results table
+# Confidence < 0.75 → field highlighted for human review
+# Human overrides tracked in: ai_parse_results.human_overrides JSONB
+```
+
+**Bias safeguard:** All fields extracted structurally — no merit scoring, no ranking. Override rate monitored by college type weekly.
+
+---
+
+### AI-2: Mentor Match Engine
+
+**Trigger:** (1) Referral form — mentor selection step; (2) Mentor rejection/timeout event
+**Model:** Azure OpenAI GPT-4o + rule-based scoring layer
+
+```python
+# Scoring Algorithm (5 dimensions, each 0–20 points = max 100)
+def score_mentor(mentor, candidate):
+    return {
+        "skill_alignment":     compute_skill_overlap(mentor.skills, candidate.skills),
+        "availability":        (4 - mentor.active_mentee_count) * 5,  # 0–20
+        "reputation":          mentor.completion_rate * 20,            # 0–20
+        "college_familiarity": 20 if mentor.has_guided_from(candidate.college) else 10,
+        "response_latency":    score_response_speed(mentor.avg_response_hours)
+    }
+
+# GPT-4o generates plain-English recommendation reason per mentor
+# Output: top 3 mentors with score, radar chart data, reason string
+# Full mentors (4/4) excluded before scoring runs
+```
+
+**Radar chart dimensions:** Skill Match · Availability · Success Rate · Familiarity · Responsiveness
+
+---
+
+### AI-3: Eligibility & Risk Profiler
+
+**Trigger:** Referral form — real-time as fields are filled
+**Model:** Rule-based engine + Azure OpenAI for narrative generation
+
+```python
+# Rule engine checks (deterministic)
+rules = [
+    check_year_of_study(form.year_of_study),          # RULE-E1
+    check_college_cap(referrer_id, form.college),      # RULE-E2
+    check_unpaid_consent(form.unpaid_consent),         # RULE-E4
+    check_inperson_readiness(form.inperson_ready),     # RULE-E5
+    check_location_alignment(form.location, form.college_location)
+]
+
+# GPT-4o generates human-readable risk narrative from rule outputs
+risk_narrative = gpt4o.generate(
+    f"Based on these risk factors {risk_factors}, write a 2-sentence"
+    f"advisory for the HR reviewer. Be specific and actionable."
+)
+```
+
+---
+
+### AI-4: Duplicate Detection
+
+**Trigger:** Resume upload in referral form
+**Model:** Deterministic fuzzy matching (no LLM needed)
+
+```python
+def detect_duplicate(email, phone, name):
+    candidates = db.query(
+        "SELECT * FROM candidates WHERE status NOT IN ('REJECTED','CLOSED')"
+        "AND created_at > NOW() - INTERVAL '24 months'"
+    )
+    for existing in candidates:
+        score = 0.0
+        if normalize_email(email) == normalize_email(existing.email): score += 0.6
+        if normalize_phone(phone) == normalize_phone(existing.phone): score += 0.4
+        name_sim = jaro_winkler(unicode_normalize(name), unicode_normalize(existing.name))
+        if name_sim > 0.85: score += name_sim * 0.2
+
+        if score >= 0.6:
+            return DuplicateResult(
+                is_duplicate=True,
+                match_id=existing.id,
+                similarity_score=score,
+                recommendation="BLOCK" if score >= 0.9 else "WARN"
+            )
+    return DuplicateResult(is_duplicate=False)
+```
+
+**Unicode normalization applied** to handle regional name variations correctly.
+
+---
+
+### AI-5: Bottleneck Predictor
+
+**Trigger:** APScheduler — runs every 6 hours on all ACTIVE referrals
+**Model:** Rule-based heuristics (Phase 1) → Gradient Boosting (Phase 2 after 6mo data)
+
+```python
+# Phase 1 heuristic scoring
+def predict_breach_risk(referral):
+    days_in_stage = (now() - referral.stage_entered_at).days
+    historical_avg = get_historical_avg(referral.current_stage)
+    hr_workload = count_open_tasks(assigned_hr_id)
+    is_friday = now().weekday() == 4
+
+    risk_score = (days_in_stage / historical_avg) * 0.5
+    risk_score += (hr_workload / 10) * 0.3
+    risk_score += 0.2 if is_friday else 0
+
+    return BreachPrediction(
+        probability=min(risk_score, 1.0),
+        predicted_stage=referral.current_stage,
+        recommended_action=generate_action(referral.current_stage, hr_workload)
+    )
+```
+
+**Output:** Surfaced on HR Dashboard as "At Risk" cards with specific action recommendations.
+
+---
+
+### AI-6: Joining Form Assistant
+
+**Trigger:** Real-time as candidate types in joining form
+**Model:** Azure OpenAI GPT-4o (for document reading) + rule-based autofill
+
+```
+When candidate uploads ID proof (Aadhaar/PAN):
+  → GPT-4o Vision extracts: name, DOB, ID number
+  → Pre-fills corresponding form fields
+  → Cross-validates: name on ID vs referral form name
+  → Flags mismatch: "Name on ID (Riya Sharma) differs from
+                     referral form (Riya S.). Please confirm."
+
+When candidate types university name:
+  → Fuzzy match against known institution list
+  → Auto-fills: state, affiliated board, institution code
+```
+
+---
+
+### AI-7: Pre-Start Compliance Checker
+
+**Trigger:** APScheduler — fires exactly 48 hours before each intern's start date
+**Model:** Rule-based (deterministic checklist) + GPT-4o for narrative + auto-escalation
+
+```python
+def run_compliance_check(intern_id):
+    checklist = {
+        "nda_signed":         check_nda_status(intern_id),
+        "non_worker_id":      check_id_status(intern_id),
+        "ad_provisioned":     check_ad_status(intern_id),
+        "badge_configured":   check_badge_status(intern_id),
+        "offer_letter_sent":  check_letter_status(intern_id)
+    }
+
+    blocking_items = [k for k, v in checklist.items() if not v]
+
+    if blocking_items:
+        # Auto-escalate each blocking item to responsible team
+        for item in blocking_items:
+            escalate_immediately(item, intern_id)
+
+        # GPT-4o generates report narrative
+        report = gpt4o.generate(f"Write a compliance report for HR. "
+                                f"Blocking items: {blocking_items}. "
+                                f"Start date: {intern.start_date}. "
+                                f"Be urgent but professional.")
+
+        send_compliance_report(intern_id, report, checklist)
+```
+
+---
+
+### AI-8: Certificate Content Generator
+
+**Trigger:** HR initiates certificate generation
+**Model:** Azure OpenAI GPT-4o
+
+```python
+SYSTEM = """You write professional internship certificate citations.
+            Be specific about the project and skills. 3-4 sentences maximum.
+            Do not fabricate metrics — only use provided data."""
+
+USER = f"""
+Generate certificate citation for:
+  Intern: {intern.name}
+  Duration: {intern.duration_weeks} weeks
+  Project: {intern.project_title}
+  Project summary: {intern.project_overview}
+  Skills demonstrated: {intern.skills}
+  Mentor feedback: {mentor.closure_feedback}
+"""
+
+# HR reviews → approves → PDF generated on letterhead
+# Azure Blob Storage → SAS delivery link to candidate
+```
+
+---
+
+### AI-9: Program Intelligence Chatbot
+
+**Trigger:** Program Owner / HR types query in S17 or S23
+**Model:** Azure OpenAI GPT-4o with function calling against NexHire DB
+
+```python
+# Function definitions available to GPT-4o
+tools = [
+    get_mentor_rejection_stats(period),
+    get_college_performance_report(),
+    get_sla_breach_summary(stage, date_range),
+    get_at_risk_referrals(),
+    get_cycle_time_trends(),
+    get_intern_completion_rates(mentor_id=None, college=None)
+]
+
+# Example interaction
+Owner: "Which mentors have the highest rejection rates this quarter?"
+GPT-4o: calls get_mentor_rejection_stats(period="Q4-2024")
+Output: "Arjun Mehta (3 rejections, 60% rejection rate) and Priya Nair
+         (2 rejections, 40%). Common reason: workload — both are at 4/4 capacity."
+```
+
+**No hallucination risk** on data queries — GPT-4o only synthesizes from live DB function results.
+
+---
+
+### AI-10: Workflow Auto-Router
+
+**Trigger:** Every time a task is created (Non-Worker ID, badge, AD provisioning, etc.)
+**Model:** Rule-based scoring (no LLM needed — deterministic)
+
+```python
+def auto_route_task(task_type, role_group):
+    eligible_members = db.query(
+        "SELECT u.*, COUNT(t.id) as open_tasks, "
+        "AVG(EXTRACT(EPOCH FROM (t.completed_at - t.created_at))/3600) as avg_response_hours "
+        "FROM users u LEFT JOIN tasks t ON t.assigned_to = u.id "
+        "WHERE u.role = :role AND u.is_available = true "
+        "GROUP BY u.id ORDER BY open_tasks ASC, avg_response_hours ASC LIMIT 1",
+        role=role_group
+    )
+
+    assigned_to = eligible_members[0]
+    log_routing_decision(task_type, assigned_to.id,
+                        reason=f"Lowest workload ({assigned_to.open_tasks} tasks), "
+                               f"fastest avg response ({assigned_to.avg_response_hours:.1f}h)")
+    return assigned_to
+```
+
+---
+
+## 8. System Architecture — Modular Monolith
+
+### 8.1 FastAPI Module Structure & Communication
+
+```
+NexHire Backend (Single FastAPI Application)
+│
+├── API Layer (FastAPI Routers — HTTP boundary)
+│   ├── /auth/*              → AuthRouter
+│   ├── /referrals/*         → ReferralRouter
+│   ├── /onboarding/*        → OnboardingRouter
+│   ├── /mentors/*           → MentorRouter
+│   ├── /tasks/*             → TaskRouter
+│   ├── /documents/*         → DocumentRouter
+│   ├── /notifications/*     → NotificationRouter
+│   ├── /ai/*                → AiRouter
+│   ├── /admin/*             → AdminRouter
+│   └── /webhooks/*          → WebhookRouter (OpenSign, Graph API)
+│
+├── Application Modules (Internal — shared process, zero network)
+│   │
+│   ├── [auth]               Authentication & RBAC
+│   ├── [referral]           Referral intake & HR review
+│   ├── [mentor]             Mentor assignment, accept/reject, timeout
+│   ├── [onboarding]         Joining form, Non-Worker ID, AD tasks
+│   ├── [ai]                 All 10 AI touchpoints (Azure OpenAI SDK)
+│   ├── [workflow]           State machine, SLA clocks, auto-rejection jobs
+│   ├── [notification]       Gmail API email delivery, template rendering
+│   ├── [document]           Azure Blob, OpenSign API, PDF generation
+│   └── [admin]              Dashboards, audit trail, configuration
+│
+├── Shared Kernel (Types only — no business logic)
+│   ├── domain_events.py     (Base DomainEvent, all event types)
+│   ├── value_objects.py     (Email, Phone, UserId, InternId — validated types)
+│   ├── exceptions.py        (BusinessRuleViolation, SlaBreachException, etc.)
+│   └── constants.py         (SLA durations, status enums, role constants)
+│
+├── Infrastructure Layer
+│   ├── database.py          (SQLAlchemy async engine, session factory)
+│   ├── event_bus.py         (In-process async event bus)
+│   ├── scheduler.py         (APScheduler setup — DB-backed job store)
+│   ├── azure_blob.py        (Azure Blob Storage client + SAS generation)
+│   ├── azure_openai.py      (Azure OpenAI client + retry logic)
+│   ├── gmail_client.py      (Gmail API OAuth2 client)
+│   ├── opensign_client.py   (OpenSign REST API client + webhook handler)
+│   └── graph_api_client.py  (Microsoft Graph API — AD provisioning)
+│
+└── Cross-Cutting Concerns
+    ├── middleware/audit.py   (Every request → immutable audit event)
+    ├── middleware/auth.py    (JWT validation + RBAC enforcement)
+    ├── middleware/rate_limit.py (Redis-backed rate limiting)
+    └── middleware/logging.py (Structured JSON logging → Azure Monitor)
+```
+
+### 8.2 Module Interaction Rules (Anti-Big-Ball-of-Mud)
+
+**Rule 1: Domain Events for Cross-Module Communication**
+No module imports another module's services directly. All cross-module communication goes through the in-process async event bus.
+
+```python
+# referral/services.py
+class ReferralService:
+    async def approve_referral(self, referral_id: UUID):
+        referral = await self.repo.get(referral_id)
+        referral.status = ReferralStatus.APPROVED
+        await self.repo.save(referral)
+        # Publish event — does NOT call NotificationService directly
+        await self.event_bus.publish(ReferralApproved(
+            referral_id=referral_id,
+            candidate_email=referral.candidate_email,
+            mentor_id=referral.mentor_id
+        ))
+
+# notification/handlers.py
+class NotificationEventHandler:
+    @event_handler(ReferralApproved)
+    async def on_referral_approved(self, event: ReferralApproved):
+        # Notification module reacts — Referral module never knew this existed
+        await self.notification_service.send_congratulations(event)
+```
+
+**Rule 2: Interface Boundaries (No Cross-Module DB Access)**
+```python
+# ❌ WRONG
+from onboarding.repositories import JoiningFormRepository
+form = await JoiningFormRepository().get_by_intern(intern_id)  # breaks encapsulation
+
+# ✅ CORRECT
+from onboarding.interfaces import OnboardingQueryPort
+status = await self.onboarding_query.get_onboarding_status(intern_id)  # contract only
+```
+
+**Rule 3: Shared Kernel is Types-Only**
+```python
+# shared/domain_events.py — ALLOWED in shared kernel
+@dataclass
+class ReferralApproved(DomainEvent):
+    referral_id: UUID
+    candidate_email: Email  # value object from shared kernel
+    mentor_id: UUID
+
+# shared/value_objects.py — ALLOWED
+class Email(str):
+    def __new__(cls, value: str):
+        if not re.match(r'^[^@]+@[^@]+\.[^@]+$', value):
+            raise ValueError(f"Invalid email: {value}")
+        return super().__new__(cls, value.lower())
+
+# ❌ NOT ALLOWED in shared kernel: business logic, DB queries, service calls
+```
+
+### 8.3 Module Specifications
+
+#### [auth] Module
+```
+Responsibilities:
+  - Azure AD OIDC token validation via MSAL
+  - Magic link generation, storage (bcrypt hashed), validation
+  - JWT issuance (RS256), refresh token rotation
+  - RBAC permission enforcement (annotation-driven)
+  - Session management (Redis-backed)
+
+Inputs:  Azure AD token, magic link token, JWT
+Outputs: Signed JWT + role claims, 401/403 errors
+Dependencies: Shared Kernel (UserId, Email), Redis, PostgreSQL (sessions)
+
+Key files:
+  auth/service.py       → AzureADAuthService, MagicLinkService, JwtService
+  auth/rbac.py          → RbacEnforcer, @require_permission decorator
+  auth/router.py        → /auth/login, /auth/callback, /auth/magic-link
+  auth/models.py        → Session, MagicLink SQLAlchemy models
+```
+
+#### [referral] Module
+```
+Responsibilities:
+  - Referral form validation (all RULE-E1 through RULE-E5)
+  - Referral CRUD (create, read, update status)
+  - College cap enforcement
+  - Year-of-study validation
+  - HR approval/rejection workflow
+  - Duplicate detection coordination (via AI module interface)
+
+Inputs:  Referral form data, HR decisions, resume file reference
+Outputs: Referral records, domain events (ReferralSubmitted, ReferralApproved, etc.)
+Dependencies: Shared Kernel, [ai] module interface, [document] module interface
+
+Key business rules enforced here:
+  - RULE-E1: year_of_study in [2, 3, 4]
+  - RULE-E2: college_referral_count(referrer_id, college) < 2
+  - RULE-E3: referrer_id ≠ mentor_id
+```
+
+#### [mentor] Module
+```
+Responsibilities:
+  - Mentor capacity tracking (max 4 mentees)
+  - Assignment request lifecycle (PENDING → ACCEPTED/REJECTED/TIMED_OUT)
+  - Mandatory rejection reason capture
+  - Attempt counter management (max 3)
+  - Auto-rejection after 3rd failure
+  - Mentor reputation score calculation
+
+Inputs:  Referral submission events, mentor accept/reject actions, scheduler ticks
+Outputs: Mentor assignment records, domain events (MentorAccepted, MentorRejected,
+         MentorTimedOut, CandidateRejectedMaxAttempts)
+
+Key APScheduler jobs:
+  check_mentor_timeouts()  → runs every hour
+    → finds MENTOR_PENDING records where assigned_at < NOW() - 3 days
+    → fires MentorTimedOut event per record
+```
+
+#### [workflow] Module
+```
+Responsibilities:
+  - Master referral state machine (all valid transitions + guards)
+  - SLA clock start/stop per stage
+  - Escalation rule evaluation
+  - NDA auto-rejection job (Day 5)
+  - Pre-start compliance check job (T-48h)
+  - Overall workflow orchestration via event reactions
+
+Key APScheduler jobs:
+  check_nda_timeouts()           → every 6 hours
+  check_sla_breaches()           → every 1 hour
+  run_compliance_checks()        → every 6 hours (filters start_date - 2 days)
+  run_bottleneck_predictions()   → every 6 hours
+  check_mentor_timeouts()        → every 1 hour
+```
+
+#### [ai] Module
+```
+Responsibilities:
+  All 10 AI touchpoints via clean AiService interface
+  Azure OpenAI client management (rate limiting, retry, cost tracking)
+  AI result caching (Redis — 1h TTL for mentor suggestions)
+  Human override tracking
+  AI performance metrics collection
+
+Public interface:
+  ai_service.parse_resume(file_bytes, mime_type) → ParseResult
+  ai_service.suggest_mentors(candidate, excluded_ids) → List[MentorRecommendation]
+  ai_service.assess_risk(form_data) → RiskProfile
+  ai_service.detect_duplicate(email, phone, name) → DuplicateResult
+  ai_service.draft_email(template_id, context) → EmailDraft
+  ai_service.predict_breach(referral) → BreachPrediction
+  ai_service.assist_joining_form(field, value) → FormAssistance
+  ai_service.check_compliance(intern_id) → ComplianceReport
+  ai_service.generate_certificate(intern_data) → CertificateText
+  ai_service.query_program(question) → ProgramInsight
+```
+
+#### [document] Module
+```
+Responsibilities:
+  - Azure Blob Storage: upload, download, SAS token generation (15min expiry)
+  - Virus scanning on upload (Azure Defender integration)
+  - OpenSign API: envelope creation, signing URL generation, webhook processing
+  - NDA lifecycle: issued → sent → signed/declined/expired
+  - PDF generation: certificates, offer letters (reportlab / weasyprint)
+  - Document metadata in PostgreSQL
+  - Retention job: anonymize expired documents per policy
+
+OpenSign Integration:
+  POST /api/request-signature → creates envelope with NDA PDF
+  Webhook: POST /webhooks/opensign → receives SIGNED/DECLINED/EXPIRED
+  GET /api/download/{envelope_id} → retrieves signed PDF for archival
+```
+
+#### [notification] Module
+```
+Responsibilities:
+  - Gmail API OAuth2 email delivery
+  - Jinja2 template rendering (9 core templates)
+  - Delivery status tracking (sent/bounced/failed)
+  - Retry queue (exponential backoff: 5min, 15min, 1h, 4h)
+  - All email content AI-drafted then stored in notification_queue
+  - Bounce rate monitoring
+
+Gmail API Setup:
+  - Service account with domain-wide delegation
+  - Send-as: nexhire-noreply@company.com
+  - Rate: 100 emails/second (Gmail API limit respected)
+  - All sends logged with recipient + content_sha256 (not full body — PII)
+```
+
+---
+
+## 9. Data Modeling
+
+### 9.1 Core Schema (PostgreSQL)
 
 ```sql
-users(id, email, password_hash, display_name, role, is_active, created_at)
-candidates(id, full_name, email, phone, address_json, education_json, skills_json, gov_ids_json, created_at)
-referrals(id, referrer_user_id, mentor_user_id, candidate_id, status, eligibility_json, project_overview, planned_start, planned_end, location, dedup_score, created_at, submitted_at)
-joining_forms(id, referral_id UNIQUE, status, payload_json, locked_by, locked_at, submitted_at)
-joining_attachments(id, joining_form_id, blob_url, file_name, content_type, uploaded_at)
-non_worker_ids(id, candidate_id, value, status, requested_at, sla_due_at, issued_at)
-ndas(id, candidate_id, template_version, esign_envelope_id, status, signed_at, archived_blob_url)
-internships(id, referral_id UNIQUE, start_date, end_date, original_end_date, status)
-access_accounts(id, internship_id UNIQUE, ad_user_principal_name, provisioned_at, deactivated_at, credential_delivery)
-certificates(id, internship_id, requested_at, issued_at, archived_blob_url)
-notification_events(id, correlation_id, type, recipient, template_id, status, attempted_at, error)
-email_templates(id, name, subject, body_md, version, active)
-audit_events(id BIGSERIAL, actor_user_id, entity_type, entity_id, action, before_json, after_json, ip, occurred_at)  -- DB role: INSERT only
-scheduled_jobs(id, job_type, run_at, payload_json, status)  -- APScheduler reads this
-workflow_state(id, referral_id, current_step, state_json, updated_at)
+-- Users (synced from Azure AD on first login)
+CREATE TABLE users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    azure_oid VARCHAR(255) UNIQUE NOT NULL,     -- Azure AD Object ID
+    email VARCHAR(255) UNIQUE NOT NULL,
+    full_name VARCHAR(255) NOT NULL,
+    role user_role NOT NULL,                    -- ENUM: REFERRER, MENTOR, HR, IT_AD, ADMIN, PROGRAM_OWNER
+    is_active BOOLEAN DEFAULT true,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
 
--- pgvector-backed (CREATE EXTENSION vector)
-candidate_embeddings(candidate_id PK, fingerprint_text, embedding vector(768), updated_at)
-faq_documents(id, title, source_uri, audience_roles[], created_at)
-faq_chunks(id, faq_document_id, chunk_text, embedding vector(768), token_count)
-chat_sessions(id, user_id, created_at)
-chat_messages(id, chat_session_id, role, content, citations_json, tool_calls_json, created_at)
-dedup_matches(id, new_referral_id, matched_candidate_id, score, band, decided_by, decided_at, decision)
+-- Referrals (core entity)
+CREATE TABLE referrals (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    referrer_id UUID NOT NULL REFERENCES users(id),
+    mentor_id UUID REFERENCES users(id),
+    candidate_name VARCHAR(255) NOT NULL,
+    candidate_email VARCHAR(255) NOT NULL,
+    candidate_phone VARCHAR(20),
+    candidate_college VARCHAR(255) NOT NULL,
+    candidate_year_of_study SMALLINT NOT NULL CHECK (year_of_study BETWEEN 2 AND 4),
+    candidate_graduation_year SMALLINT NOT NULL,
+    project_title VARCHAR(255),
+    project_overview TEXT,
+    joining_location VARCHAR(255),
+    internship_start_date DATE,
+    internship_end_date DATE,
+    relationship_declaration VARCHAR(50),
+    relationship_declaration_detail TEXT,
+    unpaid_consent BOOLEAN NOT NULL DEFAULT false,
+    inperson_ready BOOLEAN NOT NULL DEFAULT false,
+    status referral_status NOT NULL DEFAULT 'DRAFT',
+    mentor_attempt_count SMALLINT DEFAULT 0 CHECK (mentor_attempt_count <= 3),
+    resume_document_id UUID REFERENCES documents(id),
+    submitted_at TIMESTAMPTZ,
+    approved_at TIMESTAMPTZ,
+    approved_by UUID REFERENCES users(id),
+    rejected_at TIMESTAMPTZ,
+    rejected_by UUID REFERENCES users(id),
+    rejection_reason TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
 
--- AI-output tables
-ai_validations(id, entity_type, entity_id, validator_kind, verdict, concerns_json, model, prompt_version, created_at)
-   -- validator_kind ∈ {ELIGIBILITY, FORM_SEMANTIC, ATTACHMENT, SCOPE_ANALYZER}
-sla_risks(id, workflow_instance_id, evaluated_at, heuristic_band, risk_score, predicted_breach_at, root_cause, recommended_action, auto_escalate)
-ai_drafts(id, entity_type, entity_id, draft_kind, content_md, status, approved_by, approved_at, model)
-   -- draft_kind ∈ {EMAIL, NDA_SUMMARY, MENTOR_BRIEF, CERT_ACHIEVEMENTS, EXEC_DIGEST}
-anomaly_alerts(id, detected_at, severity, summary, details_json, acknowledged_by, acknowledged_at)
-agent_tool_calls(id, chat_message_id, tool_name, arguments_json, result_json, status, called_at)
-   -- audit + replay surface for the agentic chatbot's actions
+-- Unique constraint: prevent duplicate active referrals
+CREATE UNIQUE INDEX idx_referrals_active_candidate
+    ON referrals(candidate_email)
+    WHERE status NOT IN ('REJECTED', 'CLOSED', 'TERMINATED',
+                         'CANDIDATE_REJECTED', 'NDA_TIMEOUT_REJECTED',
+                         'NDA_DECLINED_REJECTED');
 
--- Promoted-from-out-of-scope additions
-mentor_profiles(user_id PK, expertise_text, expertise_embedding vector(768), bandwidth_max, current_intern_count, updated_at)
-mentor_match_runs(id, referral_id, ranked_json, model, prompt_version, created_at)
-i18n_strings(locale, key, value, source_text, translated_at)   -- LLM-batch-translated UI bundle
-image_alt_text(blob_url PK, alt_text, model, generated_at)
-a11y_audits(id, page_route, snapshot_html_hash, issues_json, severity, audited_at)
+-- College cap enforcement view
+CREATE VIEW referrer_college_counts AS
+    SELECT referrer_id, candidate_college, COUNT(*) as count
+    FROM referrals
+    WHERE status NOT IN ('REJECTED', 'CLOSED', 'TERMINATED',
+                         'CANDIDATE_REJECTED', 'NDA_TIMEOUT_REJECTED',
+                         'NDA_DECLINED_REJECTED')
+    GROUP BY referrer_id, candidate_college;
+
+-- Mentor assignments
+CREATE TABLE mentor_assignments (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    referral_id UUID NOT NULL REFERENCES referrals(id),
+    mentor_id UUID NOT NULL REFERENCES users(id),
+    attempt_number SMALLINT NOT NULL,
+    status mentor_assignment_status NOT NULL DEFAULT 'PENDING',
+    assigned_at TIMESTAMPTZ DEFAULT NOW(),
+    responded_at TIMESTAMPTZ,
+    rejection_reason TEXT,
+    timeout_at TIMESTAMPTZ                      -- set at assigned_at + 3 days
+);
+
+-- Interns (created on referral approval)
+CREATE TABLE interns (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    referral_id UUID UNIQUE NOT NULL REFERENCES referrals(id),
+    user_id UUID REFERENCES users(id),          -- candidate portal user
+    non_worker_id VARCHAR(100) UNIQUE,
+    ad_account_username VARCHAR(255),
+    ad_account_status ad_status DEFAULT 'NOT_CREATED',
+    actual_start_date DATE,
+    actual_end_date DATE,
+    status intern_status NOT NULL DEFAULT 'PENDING',
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Joining forms
+CREATE TABLE joining_forms (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    intern_id UUID UNIQUE NOT NULL REFERENCES interns(id),
+    personal_details JSONB,
+    address JSONB,
+    emergency_contact JSONB,
+    education_history JSONB,
+    employment_history JSONB,
+    govt_ids JSONB,
+    status form_status NOT NULL DEFAULT 'DRAFT',
+    version INTEGER DEFAULT 1,                  -- optimistic locking
+    submitted_at TIMESTAMPTZ,
+    locked_at TIMESTAMPTZ,
+    locked_by UUID REFERENCES users(id),
+    declaration_signed BOOLEAN DEFAULT false,
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- NDA records
+CREATE TABLE nda_records (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    intern_id UUID UNIQUE NOT NULL REFERENCES interns(id),
+    opensign_envelope_id VARCHAR(255) UNIQUE,
+    template_version VARCHAR(50),
+    status nda_status NOT NULL DEFAULT 'PENDING',
+    issued_at TIMESTAMPTZ,
+    sent_at TIMESTAMPTZ,
+    signed_at TIMESTAMPTZ,
+    declined_at TIMESTAMPTZ,
+    expired_at TIMESTAMPTZ,
+    auto_rejected_at TIMESTAMPTZ,
+    signed_document_id UUID REFERENCES documents(id),
+    reminder_1_sent_at TIMESTAMPTZ,
+    reminder_2_sent_at TIMESTAMPTZ,
+    reminder_3_sent_at TIMESTAMPTZ
+);
+
+-- Tasks
+CREATE TABLE tasks (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    intern_id UUID NOT NULL REFERENCES interns(id),
+    task_type task_type NOT NULL,               -- ENUM: NON_WORKER_ID, NDA_SIGN,
+                                                --       AD_PROVISION, BADGE_ACCESS,
+                                                --       AD_DEACTIVATE, CERT_REQUEST
+    assigned_to UUID NOT NULL REFERENCES users(id),
+    assigned_by_ai BOOLEAN DEFAULT false,
+    ai_routing_reason TEXT,
+    status task_status NOT NULL DEFAULT 'PENDING',
+    sla_deadline TIMESTAMPTZ NOT NULL,
+    warned_at TIMESTAMPTZ,
+    escalated_at TIMESTAMPTZ,
+    completed_at TIMESTAMPTZ,
+    completion_notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Documents
+CREATE TABLE documents (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    document_type doc_type NOT NULL,
+    azure_blob_container VARCHAR(255) NOT NULL,
+    azure_blob_key VARCHAR(500) NOT NULL,       -- UUID-based, unpredictable
+    file_name VARCHAR(255) NOT NULL,
+    mime_type VARCHAR(100) NOT NULL,
+    size_bytes BIGINT NOT NULL,
+    sha256_hash VARCHAR(64) NOT NULL,
+    uploaded_by UUID REFERENCES users(id),
+    uploaded_at TIMESTAMPTZ DEFAULT NOW(),
+    is_archived BOOLEAN DEFAULT false,
+    retention_delete_at DATE                    -- computed from retention policy
+);
+
+-- AI parse results
+CREATE TABLE ai_parse_results (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    referral_id UUID REFERENCES referrals(id),
+    ai_touchpoint VARCHAR(50) NOT NULL,         -- RESUME_PARSE, MENTOR_MATCH, etc.
+    model_version VARCHAR(100) NOT NULL,
+    azure_openai_request_id VARCHAR(255),
+    parsed_at TIMESTAMPTZ DEFAULT NOW(),
+    raw_output JSONB NOT NULL,
+    confidence_scores JSONB,
+    human_overrides JSONB DEFAULT '[]',         -- [{field, original, override, by, at}]
+    tokens_used INTEGER,
+    latency_ms INTEGER
+);
+
+-- Audit events (APPEND-ONLY — no UPDATE or DELETE ever)
+CREATE TABLE audit_events (
+    id BIGSERIAL PRIMARY KEY,
+    event_type VARCHAR(100) NOT NULL,
+    entity_type VARCHAR(50) NOT NULL,
+    entity_id UUID,
+    actor_user_id UUID,
+    actor_role VARCHAR(50),
+    ip_address INET,
+    user_agent TEXT,
+    event_timestamp TIMESTAMPTZ DEFAULT NOW(),
+    payload JSONB NOT NULL,
+    prev_checksum VARCHAR(64),
+    checksum VARCHAR(64) NOT NULL               -- SHA256(prev_checksum || payload::text)
+);
+
+-- Revoke UPDATE and DELETE on audit_events
+REVOKE UPDATE, DELETE ON audit_events FROM nexhire_app;
+
+-- Notifications
+CREATE TABLE notifications (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    intern_id UUID REFERENCES interns(id),
+    template_id VARCHAR(100) NOT NULL,
+    recipient_email VARCHAR(255) NOT NULL,
+    subject VARCHAR(500) NOT NULL,
+    body_sha256 VARCHAR(64) NOT NULL,           -- hash only, not full body (PII)
+    gmail_message_id VARCHAR(255),
+    status notification_status NOT NULL DEFAULT 'QUEUED',
+    queued_at TIMESTAMPTZ DEFAULT NOW(),
+    sent_at TIMESTAMPTZ,
+    delivery_status VARCHAR(50),
+    bounce_reason TEXT,
+    retry_count SMALLINT DEFAULT 0
+);
 ```
 
-Indexes only where they pay back: `referrals(status)`, `internships(end_date)`, `audit_events(entity_type, entity_id)`, `notification_events(status)`, `scheduled_jobs(run_at, status)`, plus **HNSW indexes** on both `candidate_embeddings.embedding` and `faq_chunks.embedding` (`USING hnsw (embedding vector_cosine_ops)`).
-
 ---
 
-## SLA risk prediction — expanded design
+## 10. Failure Scenarios
 
-**Goal:** every active workflow instance gets a continuously-updated risk score with an explanation and a recommended action, surfaced to the assignee and the Program Owner.
+### 10.1 Auto-Rejection Edge Cases
 
-**Hybrid pipeline (cheap-first, LLM-second):**
-
-1. **Tick (every 5 min) — `sla_risk_job` in APScheduler.** Pulls all `workflow_state` rows where status ∉ {ARCHIVED, CLOSED}.
-2. **Heuristic baseline (no LLM):**
-   - For each workflow, compute `time_in_state` and `remaining_steps_avg_duration` (rolling-window historical median per stage transition, computed from `audit_events`).
-   - `predicted_completion = now + remaining_steps_avg_duration`.
-   - `heuristic_band` = LOW (predicted_completion < 70% of SLA), MEDIUM (70–95%), HIGH (>95%) or BREACHED.
-   - LOW items skip the LLM step entirely.
-3. **LLM rationale layer (only on MEDIUM/HIGH/BREACHED):**
-   - Build a structured prompt with: workflow ID, current step, step entered_at, SLA target, recent audit events for this workflow, assignee's open task count, day-of-week, blocking dependencies.
-   - Call `gemini-2.0-flash` with JSON schema → returns:
-     ```json
-     {
-       "risk_score": 0-100,
-       "predicted_breach_at": "ISO8601",
-       "root_cause": "one-sentence narrative",
-       "recommended_action": "concrete action with assignee name",
-       "auto_escalate": true|false
-     }
-     ```
-   - Persist to `sla_risks` (latest wins via index on `(workflow_instance_id, evaluated_at DESC)`).
-4. **Action surfacing:**
-   - **Program Owner dashboard widget** — top 10 at-risk items.
-   - **Assignee email** — if `risk_score ≥ 60` and no email sent in last 4h.
-   - **Auto-escalate** — if `auto_escalate = true` AND `risk_score ≥ 80`, escalation email to Program Owner immediately.
-5. **Cost control:**
-   - Heuristic LOW items short-circuit (no LLM call).
-   - LLM call rate-limited per-workflow to once every 30 min.
-   - Cache stage-transition averages per (stage, assignee) for 1h.
-   - Expected: ≤ 100 LLM calls per tick at peak (200 active interns × 3 in-flight workflows) ≈ negligible $.
-
-**Demo moment:** judges see "this referral is 87% likely to breach NDA SLA — root cause: HR contact Sarah has 5 NDA requests open and last action was 22h ago — recommended: reassign to backup HR Priya." Then we hit "Auto-escalate" and the email lands live.
-
----
-
-## Workflow state machine (the heart of the demo)
-
-A single `WorkflowService` advances `workflow_state.current_step` through:
-
-```
-DRAFT → SUBMITTED → HR_REVIEW → NWID_REQUESTED → JOINING_INVITED →
-JOINING_SUBMITTED → JOINING_LOCKED → NDA_SENT → NDA_SIGNED →
-AD_PROVISIONED → READY_TO_START → IN_PROGRESS → CLOSURE_PENDING →
-AD_DEACTIVATED → CERT_REQUESTED → CERT_ISSUED → ARCHIVED
-```
-
-Each transition: writes audit row, emits notification(s) via `BackgroundTasks`, schedules SLA timers via APScheduler.
-
----
-
-## API surface (hackathon subset)
-
-All under `/api/v1/`.
-
-```
-POST   /auth/login                   → JWT
-POST   /auth/magic-link              → candidate first-time access
-GET    /auth/me
-
-POST   /referrals                    (Referrer)
-PUT    /referrals/{id}
-POST   /referrals/{id}/parse-resume  → triggers AI
-POST   /referrals/{id}/submit
-GET    /referrals?status=...
-
-GET    /hr/inbox                     (HR)
-POST   /hr/referrals/{id}/approve
-POST   /hr/joining/{id}/lock
-
-POST   /joining-forms/{token}        (Candidate, magic-link)
-PUT    /joining-forms/{token}
-POST   /joining-forms/{token}/attachments
-POST   /joining-forms/{token}/submit
-
-POST   /nda/{candidate_id}/issue     (HR)
-POST   /webhooks/docusign            (DocuSign callback)
-
-POST   /access/{internship_id}/provision   (IT)
-POST   /access/{internship_id}/deactivate  (system or IT)
-
-GET    /mentor/dossier/{internship_id}   (Mentor)
-
-POST   /internships/{id}/start-confirmation
-POST   /internships/{id}/extend
-POST   /internships/{id}/close
-
-POST   /certificates/{internship_id}/request   (Candidate)
-POST   /certificates/{id}/issue                (HR)
-
-GET    /dashboards/stages       (Program Owner)
-GET    /dashboards/sla
-GET    /audit?entity_type=&entity_id=
-
-POST   /dedup/check
-GET    /dedup/matches/{referral_id}
-POST   /dedup/matches/{id}/decide
-
-POST   /chatbot/sessions
-POST   /chatbot/sessions/{id}/messages    (RAG + tool-calling; returns answer + citations + tool_calls)
-GET    /chatbot/sessions/{id}
-POST   /admin/faq/documents
-POST   /admin/faq/reindex
-
-POST   /referrals/intake/conversation     (alt. flow: conversational intake)
-POST   /ai/validate/eligibility
-POST   /ai/validate/form
-POST   /ai/validate/attachment
-POST   /ai/scope/analyze
-POST   /ai/nda/{nda_id}/summary
-GET    /ai/mentor/dossier/{internship_id}/brief
-POST   /ai/certificates/{id}/achievements
-POST   /ai/communications/draft
-POST   /ai/communications/{draft_id}/approve
-
-GET    /sla/risks
-POST   /sla/risks/recompute
-GET    /anomalies
-POST   /anomalies/{id}/acknowledge
-
-GET    /digests/weekly/latest
-POST   /digests/weekly/regenerate
-
-POST   /ai/mentors/suggest
-GET    /mentors/profiles
-PUT    /mentors/profiles/{user_id}
-
-GET    /i18n/strings/{locale}
-POST   /admin/i18n/translate
-
-POST   /ai/alt-text
-POST   /ai/a11y/audit
-```
-
-FastAPI auto-generates Swagger UI at `/docs` — leave it on, judges love it.
-
----
-
-## Build phases (2-4 weeks for 1-3 devs)
-
-### Week 1 — Foundations + AI-driven referral intake
-- Repo skeleton (backend + frontend + docker-compose), Alembic migrations, seed script
-- Postgres with `pgvector` extension enabled
-- JWT auth with 6 seeded users
-- Audit table + service; `ai_validations` + `ai_drafts` tables created up front
-- Google Gemini client wrapper (`integrations/gemini.py`) with helpers: `complete_json()`, `embed()`, `complete_with_tools()`, `generate_with_pdf()`, `detect_language()`
-- **AI #1 Resume parser** + Blob upload + classic referral form prefill
-- **AI #4 Eligibility validator** + **AI #5 Smart form validator** wired into referral submit
-- **AI #3 Conversational referral intake** — chat UI calls `gemini-2.0-flash` with `submit_referral` tool; voice via Web Speech API
-- React: Login, Referral New (form mode + chat mode toggle), Referral List
-- Gmail OAuth + `send_email()`
-- **Demo checkpoint:** referrer either fills the form (AI prefilled) OR speaks the referral aloud and AI builds it; eligibility flags surface live concerns
-
-### Week 2 — HR review, joining, NDA, dedup, attachment intelligence
-- HR inbox + approve action
-- **AI #6 Hybrid duplicate detection** with HR review screen
-- **AI #8 Personalized communications** — every triggered email goes through `ai_drafts` flow; HR sees draft, can edit, approve, send
-- Magic-link auth for candidates
-- Joining form (multi-step, save-draft, attachments)
-- **AI #11 Attachment intelligence** — Gemini native vision reads uploaded transcripts/IDs (PDF/image) and cross-checks vs. declared values; verdict written to `ai_validations`
-- **AI #5 Smart form validator** also runs on joining form submit
-- DocuSign envelope + webhook
-- **AI #13 NDA plain-language summary** — generated when envelope is created; shown to candidate before they sign
-- Workflow state machine wired through these transitions
-- **Demo checkpoint:** dedup catches similar candidate → HR resolves → AI-drafted personalized invite email → candidate uploads transcript → AI flags mismatch → fixes → signs NDA after reading the AI summary
-
-### Week 3 — AD, mentor, lifecycle, closure, scope analyzer, cert text
-- Microsoft Graph: create + disable user
-- Credential delivery email (Gmail)
-- **AI #9 Project scope analyzer** — runs when mentor saves project overview
-- **AI #15 Mentor dossier brief** — generated on dossier load
-- Lifecycle endpoints (start/extend/close)
-- **AI #20 Personalized certificate text** — LLM drafts achievements paragraph; mentor reviews; baked into PDF
-- APScheduler: closure-7-days reminder, AD-deactivation-on-end-date job
-- **Demo checkpoint:** mentor enters thin project description → AI suggests scope improvements → internship runs → on closure, certificate has personalized achievements paragraph
-
-### Week 4 — Predictive AI, agentic chatbot, dashboards, deploy, demo
-- Program Owner dashboard (stage counts, breaches, cycle time)
-- **AI #17 SLA risk prediction** — `sla_risk_job` ticks every 5 min; `SlaRiskWidget` on dashboard; auto-escalation emails wired
-- **AI #18 Anomaly detection** — hourly job scans recent `audit_events`, calls LLM, writes `anomaly_alerts`
-- **AI #19 Weekly executive digest agent** — Sunday-night APScheduler job composes narrative + emails to Program Owner
-- **AI #21 Agentic FAQ chatbot** — RAG over `faq_chunks` (audience-role filtered) + **LLM reranker** (top-20 → top-5) + function-calling tools (`get_my_pending_tasks`, `get_referral_status`, `extend_internship`, `request_nda_resend`, `escalate_sla_breach`, `submit_referral`); each tool enforces RBAC server-side; tool calls logged to `agent_tool_calls`. Mantine `Drawer` widget, role-aware
-- **AI #23 Mentor matchmaking** — seed `mentor_profiles` with 6 mentors; `POST /ai/mentors/suggest` returns ranked top-3 with rationale; UI in Referral New shows them when mentor field is empty
-- **AI #24 Multilingual interaction** — middleware reads `Accept-Language`; `i18n_strings` table populated by LLM batch-translation script (run during build); detect-language helper added to chatbot + intake + draft prompts
-- **AI #25 Alt-text + WCAG audit** — alt-text job auto-runs on every Blob upload; admin panel "Run accessibility audit" button calls `/ai/a11y/audit` on the current rendered page
-- **Continuous re-embedding** — SQLAlchemy event listener on `candidates` table triggers fingerprint refresh as `BackgroundTask`
-- Audit log viewer + email template management
-- Application Insights + structured logs
-- Deploy to Azure App Service via GitHub Actions
-- Seeded demo data + recorded demo script
-- **Demo checkpoints:**
-  - HR opens chatbot, types "extend Jane Doe by two weeks and email her mentor" → bot calls `extend_internship` + AI-drafts mentor email + sends → audit trail shows the chain
-  - Referrer types referral in Hindi via voice → bot confirms back in Hindi → submits cleanly
-  - Referrer leaves mentor blank → AI suggests "Mentor Anil (skill match 0.91, bandwidth 2/3, rationale: deep ML background, available)"
-
----
-
-## Critical files / modules to create
-
-These don't exist yet — this is greenfield. The new files to scaffold first (in priority order):
-
-1. `backend/app/main.py` — FastAPI app + static mount + scheduler bootstrap
-2. `backend/app/core/config.py` — pydantic-settings reading from env / Key Vault
-3. `backend/app/db.py` — SQLAlchemy engine, sessionmaker
-4. `backend/app/services/workflow.py` — state machine
-5. `backend/app/services/notification_service.py` — Gmail send + template render
-6. `backend/app/integrations/gemini.py` — Gemini SDK wrapper: `complete_json()`, `embed()`, `complete_with_tools()`, `generate_with_pdf()` (native PDF/image input), `detect_language()`
-7. `backend/app/integrations/docusign.py` — `create_envelope()` + `verify_webhook_hmac()`
-8. `backend/app/integrations/ms_graph.py` — `create_user()`, `disable_user()`
-9. `backend/app/services/dedup_service.py` — hybrid rules-and-cosine match
-10. `backend/app/services/chatbot_service.py` — RAG + function-calling tools
-11. `backend/app/services/agent_tools.py` — typed tool functions exposed to the chatbot
-12. `backend/app/services/faq_ingest.py` — chunk + embed + upsert
-13. `backend/app/services/ai_validation_service.py` — eligibility, semantic form, attachment, scope analyzer
-14. `backend/app/services/ai_draft_service.py` — drafts EMAIL / NDA_SUMMARY / MENTOR_BRIEF / CERT_ACHIEVEMENTS / EXEC_DIGEST
-15. `backend/app/services/sla_risk_service.py` — heuristic + LLM
-16. `backend/app/services/sla_history.py` — rolling median per stage
-17. `backend/app/services/anomaly_service.py` — periodic LLM pass on audit
-18. `backend/app/services/exec_digest_service.py` — weekly autonomous narrative
-19. `backend/app/services/conversational_intake.py` — multi-turn referral via tools
-20. `backend/app/services/mentor_match_service.py` — score mentors, return top-3
-21. `backend/app/services/i18n_service.py` — language detect + LLM batch translation
-22. `backend/app/services/a11y_service.py` — alt-text + WCAG audit
-23. `backend/app/services/reranker.py` — LLM rerank top-20 → top-5
-24. `scripts/build_i18n.py` — one-shot LLM translation of UI strings
-25. `backend/Dockerfile` — multi-stage: node build → python runtime
-26. `frontend/src/api/client.ts` — axios + JWT interceptor
-27. `frontend/src/pages/ReferralNew.tsx` — form mode + chat mode toggle (Web Speech API)
-28. `frontend/src/pages/DedupReview.tsx` — HR side-by-side candidate comparison + decision
-29. `frontend/src/pages/Dashboard.tsx` — stage counts + SLA risk widget + anomalies + latest digest
-30. `frontend/src/components/ChatWidget.tsx` — floating drawer; renders citations + tool-call cards
-31. `frontend/src/components/SlaRiskWidget.tsx` — top at-risk items
-32. `frontend/src/components/AiDraftReview.tsx` — generic draft-edit-approve component
-33. `seed/faqs/` — markdown FAQ corpus (program rules, NDA FAQ, joining checklist, certificate process)
-34. `seed.py` — demo users + templates + FAQ ingestion + sample audit history (so SLA risk model has signal at demo time)
-
----
-
-## Reusable libraries (pull in early, don't reinvent)
-
-| Need | Library | Why |
-|---|---|---|
-| OAuth for Gmail | `google-auth` + `google-api-python-client` | Official, battle-tested |
-| DocuSign | `docusign-esign` | Official SDK, has sandbox |
-| Microsoft Graph | `msgraph-sdk` (async) | Official; handles auth + retries |
-| HTML→PDF | `WeasyPrint` | Pure Python, good CSS support; no headless Chrome |
-| Resume PDF text | `pdfplumber` | Best ergonomics for tabular resumes |
-| Settings | `pydantic-settings` | Env + Key Vault |
-| Scheduler | `APScheduler` with `SQLAlchemyJobStore` | Persistent jobs survive restart |
-| Bcrypt + JWT | `passlib[bcrypt]` + `python-jose[cryptography]` | Standard FastAPI auth recipe |
-| Blob | `azure-storage-blob` | Official |
-| pgvector ORM | `pgvector` (SQLAlchemy adapter) | `Vector(768)` column type for Gemini embeddings |
-| Google Gemini client | `google-genai` (the new unified SDK) | Official; one client handles chat, embeddings, vision, tools, JSON-mode |
-| Phone normalization | `phonenumbers` | E.164 normalization for dedup rules |
-| Markdown chunking | Simple custom token-aware splitter | Splits FAQ markdown by heading + token budget |
-| Fuzzy name match | `rapidfuzz` | Levenshtein/Jaro-Winkler for the rules tier of dedup |
-| Language detection | `langdetect` | Lightweight, used to set system-prompt language |
-
----
-
-## Deployment
-
-- **One** App Service for Containers (Linux, B2 SKU is enough for 200 users).
-- **One** Postgres Flexible Server, B1ms, single zone, with `vector` extension enabled.
-- **One** Storage Account with one Blob container (`intern-flow`).
-- **Google AI Studio API key** (free tier) for `gemini-2.0-flash` + `text-embedding-004` — no Google Cloud project setup needed; AI Studio issues the key directly. Stored in Azure Key Vault.
-- **One** App Insights instance.
-- **One** Key Vault holding: DB connection string, DocuSign creds, Gmail refresh token, Graph client secret, JWT signing key, **Google Gemini API key**.
-- **One** ACR for the image.
-- App Service uses **system-assigned managed identity** with Key Vault access.
-- **GitHub Actions**: on push to `main` → build image → push to ACR → `az webapp deploy` → curl health check.
-
-Estimated monthly cost (post-hackathon, idle): **~$50–80/mo**.
-
----
-
-## Verification / demo plan
-
-End-to-end test of the **golden path** before the demo. Each step listed should pass cleanly.
-
-1. **Local smoke test** — `docker-compose up` brings up `api` + `postgres` + `adminer`. Run `python seed.py`. Hit `http://localhost:8000/docs` — Swagger renders.
-2. **Auth** — `POST /api/v1/auth/login` with seeded HR user → JWT returned → `GET /auth/me` returns role=HR.
-3. **Referral + AI** — As referrer, upload sample resume PDF → response includes `parsed_fields` with name/email/skills filled. Verify `audit_events` logs override.
-4. **HR approve** — As HR, `POST /hr/referrals/{id}/approve` → seeded candidate Gmail receives joining-form magic link. Verify `notification_events.status = sent`.
-5. **Joining form** — Click magic link → fill form → upload attachment → verify Blob upload → submit → HR locks it.
-6. **NDA** — `POST /nda/{candidate_id}/issue` → DocuSign envelope created → click sandbox link → sign → webhook fires → DB status = `signed` → `audit_events` logs.
-7. **AD provisioning** — `POST /access/{id}/provision` → user appears in test Entra tenant via Graph → credential email arrives.
-8. **Lifecycle** — Set internship `end_date = today` → APScheduler tick → Graph user disabled and deactivation row created.
-9. **Certificate** — Candidate `POST /certificates/{internship_id}/request` → HR `POST /certificates/{id}/issue` → PDF in Blob, link emailed.
-10. **Dashboard** — Program Owner login → dashboard shows 1 in each stage with non-zero cycle time.
-11. **Audit** — `GET /audit?entity_type=referral&entity_id={id}` returns full event chain.
-12. **Duplicate detection** — Submit second referral with same candidate email → `dedup_score ≥ 0.99`, band=LIKELY. Submit a third with paraphrased name + same skills → band=POSSIBLE. Submit a fourth unrelated → band=UNIQUE.
-13. **FAQ chatbot (RAG)** — As Candidate ask "When does my NDA need to be signed?" → answer cites joining-checklist chunk. As HR ask "What's the SLA on Non-Worker ID?" → reflects HR-audience chunk. Ask off-topic → bot declines.
-14. **Conversational intake** — Click "Talk to AI" on Referral New → speak: "I'd like to refer Priya Patel, priya@example.com, for a 12-week ML internship with mentor Anil starting July 1" → bot confirms each captured field then calls `submit_referral` → referral row exists.
-15. **Eligibility + semantic form validators** — Submit a referral with `in_person = true` but candidate address abroad → eligibility validator returns concern; submit a joining form where phone is `+91...` but address is in Germany → semantic validator flags it.
-16. **Project scope analyzer** — Mentor saves a 1-line project description for a 12-week internship → analyzer returns "scope is thin for the duration" + 3 suggested learning objectives.
-17. **Attachment intelligence** — Upload a transcript declaring "B.Tech, IIT Madras" but joining form declared "M.Tech" → validator flags mismatch.
-18. **NDA plain-language summary** — Click DocuSign envelope link → candidate-side page shows AI summary above the legal doc; verify it lists the actual obligations.
-19. **Mentor brief** — Open `/mentor/dossier/{id}` → top of page shows AI-drafted welcome paragraph mentioning candidate's actual skills + project.
-20. **Personalized certificate text** — On closure → mentor reviews achievements paragraph → approves → final PDF includes it.
-21. **SLA risk prediction** — Force a tick via `POST /sla/risks/recompute` after seeding a stale workflow → dashboard shows top item with risk_score, breach time, root_cause, recommended_action; auto-escalation email lands when score ≥ 80.
-22. **Anomaly detection** — Seed 8 referrals from one referrer in 24h → next anomaly tick produces alert.
-23. **Weekly digest** — `POST /digests/weekly/regenerate` → narrative report contains volume, breaches, root causes; arrives in Program Owner inbox.
-24. **Agentic chatbot** — As HR, type "extend Jane Doe by 2 weeks and email her mentor" → bot calls `extend_internship` (verified in DB) → drafts mentor email via `ai_draft_service` → sends → `agent_tool_calls` logs both calls.
-25. **Personalized comms** — Trigger HR approval on a referral → AI draft appears in `/ai/communications/...` queue → HR edits one sentence → approves → Gmail send fires.
-26. **Mentor matchmaking** — Submit a referral with mentor field blank → response includes 3 ranked mentor suggestions with skill-match scores and rationales.
-27. **Multilingual** — Set browser `Accept-Language: hi` → UI labels render in Hindi from `i18n_strings`. Open chatbot, ask in Tamil "என் pending tasks என்ன?" → answer comes back in Tamil.
-28. **Continuous re-embedding** — Edit a candidate's email/skills row → within 1 minute the new fingerprint embedding is in `candidate_embeddings`. Run dedup again → finds matches based on fresh data.
-29. **Reranker** — Inspect chatbot logs: `reranker.py` was called, took top-20 cosine results, returned top-5 with relevance scores; final answer cites only chunks from the reranked set.
-30. **Alt-text + WCAG** — Upload a profile image → `image_alt_text` row appears with a sensible caption. From admin panel, click "Run a11y audit" → returns issues for any unlabeled form input on the current page.
-
-**Hackathon demo script (5 min):** record this happy path with two browser windows (referrer + candidate), then a third (HR) to bridge approvals. Pre-seed the AI parse with a known resume so timing is predictable.
-
----
-
-## Risks & how the plan handles them
-
-| Risk | Handling |
+| Scenario | Handling |
 |---|---|
-| DocuSign sandbox webhook unreachable from local | `ngrok http 8000` during dev; in prod, App Service has a public URL |
-| Microsoft Graph permission setup eats a day | Day 1 of week 3, get a Global-Admin contact to consent app permissions in test tenant |
-| Gmail OAuth refresh-token expiry | Use a long-lived refresh token from one shared demo Google Workspace account |
-| Gemini free-tier RPM limit (15 req/min on AI Studio) bites during dev iteration | Cache LLM responses against fixture inputs in tests so prompt-tuning loops don't burn quota; if it bites in dev, upgrade to paid (still cheap, ~$5–10/month at hackathon volume). Production demo runs single-user so 15 RPM is plenty |
-| Cross-cloud secret distribution (Gemini API key in Azure Key Vault) | Standard pattern — Key Vault is vendor-neutral; managed identity reads the key at startup and the Gemini SDK uses it like any other API key |
-| WeasyPrint system deps in container | Use `python:3.12-slim` and `apt-get install` deps in Dockerfile — do this in week 1 |
-| Single-container scheduler dies on restart and loses jobs | APScheduler `SQLAlchemyJobStore` against Postgres — jobs survive restart |
-| Azure DB for Postgres Flexible Server may not have `vector` enabled by default | Enable via Azure portal *Server parameters → azure.extensions* before week 2 |
-| Embedding cost grows with corpus | `text-embedding-004` is **free on AI Studio**; batch embed (100 chunks/call), re-embed only on change. Total corpus likely < 500 chunks for hackathon |
-| Chatbot hallucination on compliance answers | System prompt forbids answers without citations; if no chunk ≥ similarity 0.75 → bot replies "I don't have that information, please contact HR" |
-| Dedup false positives block legitimate referrals | Bands are advisory — only LIKELY auto-blocks; POSSIBLE prompts HR review; UNIQUE auto-passes |
-| Total LLM spend for 20 AI surfaces | Gemini free tier (15 RPM, 1M TPM, 1500 req/day) covers the demo. Heuristic gating + caching everywhere. SLA only LLM-calls non-LOW; anomaly hourly; digest weekly; validators once per submission; chatbot caps tokens at 1k/turn. **Estimated $0** on free tier; **< $10** if paid tier is needed during dev |
-| Agentic chatbot taking destructive actions | Every tool function enforces RBAC server-side and writes `agent_tool_calls`. Destructive tools (extend, escalate) confirm with user. `extend_internship` capped at +30 days. No tool deletes |
-| AI drafts going out unreviewed | All EMAIL drafts to external/legal recipients require HR approval. Internal-only emails auto-send |
-| LLM latency on form submit makes UX laggy | Validation calls fire as `BackgroundTasks` after 200 OK; UI polls and surfaces concerns asynchronously. Resume parse stays sync (capped at 8s) with manual-fill fallback |
-| 2-4 week scope is ambitious | Cut order if slipping: anomaly → digest → conversational intake (keep classic form) → attachment intelligence → personalized cert text. Never cut chatbot, dedup, SLA prediction, eligibility/form validators |
+| APScheduler crashes before NDA auto-reject fires | Job is DB-backed (persisted) — resumes on restart; idempotency key prevents double execution |
+| Candidate signs NDA at Day 4 23:59 | Signing event from OpenSign webhook updates nda.status = SIGNED; scheduler job checks status before firing — auto-reject aborted |
+| Mentor responds at exactly 72h mark | Race condition handled by DB transaction: mentor response wins if committed before scheduler job starts; idempotent event processing |
+| Third mentor attempt fails but event bus is down | Synchronous fallback: workflow state written to DB first, event published after; at-least-once delivery with deduplication |
+| OpenSign webhook not received (network issue) | Polling job runs every 15 minutes to check pending NDA status via OpenSign API as fallback |
+
+### 10.2 Azure OpenAI Failures
+
+| Failure | Response |
+|---|---|
+| Rate limit hit | Exponential backoff (1s, 2s, 4s, 8s); cached results served if available |
+| Timeout > 10s | Fallback: show "AI unavailable" with manual fields; user proceeds without prefill |
+| Malformed JSON output | Retry with corrected prompt (max 2 retries); fall back to empty prefill |
+| Azure OpenAI quota exceeded | Alert ops team via Azure Monitor; all AI touchpoints degrade gracefully to manual mode |
+
+### 10.3 OpenSign Integration Failures
+
+| Failure | Response |
+|---|---|
+| OpenSign container down | NDA issuance queued in notifications table; retry every 1h; HR alerted |
+| Webhook signature invalid | Reject and log; poll OpenSign API as backup within 15 minutes |
+| Envelope ID not found | Log error; HR manually triggered to re-issue; audit event recorded |
+
+### 10.4 Microsoft Graph API Failures
+
+| Failure | Response |
+|---|---|
+| Graph API returns 503 | Task remains PENDING; IT alerted; retry every 30 minutes |
+| AD account creation fails | Detailed error logged; IT task shows error reason; manual intervention with system update |
+| Deactivation fails at end | Escalation to Program Owner and IT Manager within 2 hours |
 
 ---
 
-## Promoted from "Out of scope" → AI-scope (5 items)
+## 11. Metrics & Feedback Loops
 
-These were originally cut, but each is genuinely doable by AI inside the 2–4 week window. Adding them lifts the AI ratio further and addresses real gaps.
+### 11.1 AI Performance Dashboard (Program Owner — S23)
 
-1. **LLM reranker on RAG retrieval** — 2-stage retrieval for the chatbot: pgvector returns top-20 by cosine, then `gemini-2.0-flash` reranks to top-5 with relevance + role-fit scores. Cheap (one extra LLM call per query, ≤500 tokens) and noticeably improves answer relevance.
-2. **Continuous re-embedding on candidate edits** — when a candidate row updates (HR correction, joining-form data fills in DOB, address, etc.), recompute the fingerprint embedding via `BackgroundTasks`. Keeps dedup search "live".
-3. **Multilingual interaction (i18n via AI)** — every user-typed input is auto-detected for language; chatbot, conversational intake, validators, AI-drafted emails, and NDA summaries respond in the user's language. UI labels use `Accept-Language` + LLM batch-translate at build time into JSON resource bundles for top 8 languages (en, hi, ta, te, kn, ml, es, fr).
-4. **Mentor-candidate matchmaking AI** — when the referrer leaves the mentor field empty, an LLM scores all available mentors against candidate skills + project domain + mentor's current workload and returns top 3 with rationale.
-5. **AI accessibility helper** — alt-text generation for any uploaded image via `gemini-2.0-flash` native vision; AI WCAG audit endpoint `POST /ai/a11y/audit` that takes a rendered HTML snippet and returns flagged issues with suggested fixes.
+| Metric | Target | Alert Threshold |
+|---|---|---|
+| Resume parse success rate | ≥ 95% | < 90% |
+| Average parse confidence (name/email) | ≥ 0.85 | < 0.75 |
+| Human override rate (any field) | ≤ 15% | > 20% |
+| Mentor match acceptance rate (top suggestion) | ≥ 60% | < 40% |
+| Email draft send-without-edit rate | ≥ 70% | < 50% |
+| Duplicate detection false positive rate | ≤ 5% | > 10% |
+| Azure OpenAI latency (p95) | ≤ 8s | > 15s |
+| Azure OpenAI cost per referral | Tracked | +50% spike |
 
-These bring the AI footprint from 16 / 22 (~73%) to **20 / 26 (~77%)** — and the existing #6 (dedup), #21 (chatbot) become measurably better, not just bigger.
+### 11.2 AI Continuous Improvement Loop
 
-## Still out of scope (truly not AI-doable / not worth the time)
+```
+[AI Output] → [Human Reviews] → [Override Captured]
+                                        │
+                              Weekly Analysis Job
+                                        │
+                    ┌───────────────────┼───────────────────┐
+                    │                   │                   │
+              Override rate        False positive      Cost per
+              by field > 20%       rate > 10%          referral spike
+                    │                   │                   │
+            Prompt engineering    Threshold tune      Model version
+            review + update       in config           review
+                    │
+              Canary deploy (10% traffic)
+                    │
+              Compare override rates
+                    │
+              Full rollout if improved
+```
 
-- Read replicas, multi-region, Azure Front Door — infra, not AI
-- Always-Encrypted PII columns — security, not AI
-- Performance / load testing for >200 users — irrelevant at hackathon scale
-- Migration from monolith to services (covered in [Architecture_Analysis.md](./Architecture_Analysis.md))
-- Fine-tuning custom models — off-the-shelf `gemini-2.0-flash` is more than adequate; fine-tuning needs labeled data we can't curate in time
-- LangChain / LlamaIndex — direct `google-genai` SDK calls keep dependencies minimal and demos predictable
+---
+
+## 12. Security & Ethics
+
+### 12.1 Azure Security Posture
+
+| Control | Implementation |
+|---|---|
+| Data at rest | Azure Database for PostgreSQL — encryption enabled (AES-256) |
+| Blob encryption | Azure Blob Storage — Microsoft-managed keys (phase 1); CMK (phase 2) |
+| Data in transit | TLS 1.3 minimum; internal OpenSign on same Azure VNet |
+| Identity | Azure AD — MFA enforced for all internal users via Conditional Access |
+| Secrets management | Azure Key Vault — all API keys, connection strings, JWT private keys |
+| Network | Azure App Service VNet Integration; PostgreSQL on private endpoint |
+| Monitoring | Azure Application Insights + Azure Monitor alerts |
+| Vulnerability scanning | Azure Defender for App Service + Container Registry |
+| File upload safety | Azure Defender for Storage — malware scanning on blob upload |
+
+### 12.2 PII Minimization by Role
+
+| Role | PII Accessible |
+|---|---|
+| IT/AD | Name, Non-Worker ID, AD username, start/end date ONLY |
+| Admin/Security | Name, photo, start/end date, location ONLY |
+| Mentor | Full dossier (name, skills, project) — no govt IDs |
+| Referrer | Own referrals only; candidate contact details masked after approval |
+| HR | Full record |
+| Program Owner | Aggregated data; individual records on drill-down |
+
+### 12.3 AI Ethics
+
+- **No merit ranking:** AI never scores candidates for suitability — only parses structure and detects duplicates
+- **Transparency:** Every AI-filled field is visually marked; confidence shown on hover
+- **Human override always available:** No AI decision is final without human confirmation
+- **Override audit:** Every override logged with actor, field, original value, new value, timestamp
+- **Bias monitoring:** Override rates tracked by college tier, state, resume language — investigated if > 20% disparity
+- **Data residency:** All Azure OpenAI calls route through Azure region within India/organization boundary
+
+---
+
+## 13. Future Evolution
+
+### 13.1 Scaling the Monolith
+
+**Immediate (launch):**
+- FastAPI async + uvicorn with 4 workers handles 500 concurrent users comfortably
+- Azure Database for PostgreSQL Flexible Server auto-scales storage
+- Azure App Service — scale up vertically before scaling out
+
+**Medium-term:**
+- Redis caching for AI results (mentor suggestions, risk profiles)
+- PostgreSQL read replica for all Admin/Reporting module queries
+- Azure CDN for static frontend assets (React build)
+- APScheduler → Azure Service Bus for reliable job queuing (no job loss on restart)
+
+### 13.2 Microservice Extraction Path (When Needed)
+
+```
+Step 1: Replace in-process event bus with Transactional Outbox
+        (events written to outbox table within same DB transaction)
+
+Step 2: Add relay process: outbox table → Azure Service Bus
+
+Step 3: Extract AI Module to separate FastAPI service
+        (First candidate: different resource needs — GPU for LLM inference)
+        Module's public interface contract remains identical
+
+Step 4: Extract Notification Module
+        (Second candidate: high-frequency, independent scaling)
+
+Clean extraction guaranteed because:
+  - No cross-module DB access (interface boundaries enforced from day 1)
+  - Domain events already define the API contract
+  - Module internals are fully encapsulated
+```
+
+---
+
+## 14. Project Folder Structure
+
+```
+nexhire/
+│
+├── frontend/                          # React + TypeScript SPA
+│   ├── src/
+│   │   ├── app/
+│   │   │   ├── routes/                # Role-based route definitions
+│   │   │   ├── providers/             # QueryClient, AuthProvider, ThemeProvider
+│   │   │   └── App.tsx
+│   │   ├── modules/
+│   │   │   ├── auth/
+│   │   │   │   ├── components/        # Login, MagicLinkEntry
+│   │   │   │   ├── hooks/             # useAuth, useMsal
+│   │   │   │   └── api.ts
+│   │   │   ├── referral/
+│   │   │   │   ├── components/        # ReferralForm, ReferralCard, ReferralTimeline
+│   │   │   │   ├── hooks/             # useReferralForm, useAiPrefill
+│   │   │   │   └── api.ts
+│   │   │   ├── mentor/
+│   │   │   │   ├── components/        # MentorPicker, MentorRadarChart, ReselectionPanel
+│   │   │   │   └── api.ts
+│   │   │   ├── onboarding/
+│   │   │   │   ├── components/        # JoiningForm, NdaViewer, FormAssistant
+│   │   │   │   └── api.ts
+│   │   │   ├── dashboard/
+│   │   │   │   ├── components/        # SlaHeartbeat, CollegeMap, BottleneckCard
+│   │   │   │   └── api.ts
+│   │   │   └── admin/
+│   │   │       ├── components/        # AuditTrail, ConfigPanel, AiChatbot
+│   │   │       └── api.ts
+│   │   ├── shared/
+│   │   │   ├── components/            # WhatHappensNext, ConfidenceBadge, SlaCountdown
+│   │   │   ├── hooks/                 # usePermission, useSlaCountdown
+│   │   │   └── types.ts
+│   │   └── lib/
+│   │       ├── axios.ts               # Axios instance + JWT interceptor
+│   │       ├── msal.ts                # MSAL Azure AD config
+│   │       └── utils.ts
+│   ├── public/
+│   ├── index.html
+│   ├── vite.config.ts
+│   └── tsconfig.json
+│
+├── backend/                           # Python FastAPI Modular Monolith
+│   ├── app/
+│   │   ├── main.py                    # FastAPI app init, router registration, middleware
+│   │   ├── config.py                  # Settings (Azure Key Vault + env vars via pydantic-settings)
+│   │   │
+│   │   ├── shared/                    # Shared Kernel — types only
+│   │   │   ├── domain_events.py       # Base DomainEvent + all event dataclasses
+│   │   │   ├── value_objects.py       # Email, PhoneNumber, UserId, InternId
+│   │   │   ├── exceptions.py          # BusinessRuleViolation, SlaBreachException
+│   │   │   └── constants.py           # Enums, SLA durations, role constants
+│   │   │
+│   │   ├── modules/
+│   │   │   ├── auth/
+│   │   │   │   ├── router.py          # /auth/* endpoints
+│   │   │   │   ├── service.py         # AzureADAuthService, MagicLinkService, JwtService
+│   │   │   │   ├── rbac.py            # RbacEnforcer, require_permission decorator
+│   │   │   │   ├── models.py          # Session, MagicLink SQLAlchemy models
+│   │   │   │   └── schemas.py         # Pydantic request/response schemas
+│   │   │   │
+│   │   │   ├── referral/
+│   │   │   │   ├── router.py          # /referrals/* endpoints
+│   │   │   │   ├── service.py         # ReferralService (submit, approve, reject)
+│   │   │   │   ├── validator.py       # All RULE-E1 through RULE-E5 enforcement
+│   │   │   │   ├── repository.py      # ReferralRepository (SQLAlchemy async)
+│   │   │   │   ├── query_service.py   # Read-side: list, filter, search
+│   │   │   │   ├── models.py          # Referral SQLAlchemy model
+│   │   │   │   └── schemas.py
+│   │   │   │
+│   │   │   ├── mentor/
+│   │   │   │   ├── router.py          # /mentors/* endpoints
+│   │   │   │   ├── service.py         # MentorAssignmentService, ReputationService
+│   │   │   │   ├── timeout_job.py     # APScheduler: check_mentor_timeouts()
+│   │   │   │   ├── repository.py      # MentorAssignmentRepository
+│   │   │   │   ├── models.py          # MentorAssignment SQLAlchemy model
+│   │   │   │   └── schemas.py
+│   │   │   │
+│   │   │   ├── onboarding/
+│   │   │   │   ├── router.py          # /onboarding/* endpoints
+│   │   │   │   ├── service.py         # JoiningFormService, NonWorkerIdService
+│   │   │   │   ├── ad_service.py      # Microsoft Graph API provisioning
+│   │   │   │   ├── validator.py       # Joining form field validations
+│   │   │   │   ├── repository.py
+│   │   │   │   ├── models.py          # Intern, JoiningForm SQLAlchemy models
+│   │   │   │   └── schemas.py
+│   │   │   │
+│   │   │   ├── ai/
+│   │   │   │   ├── router.py          # /ai/* endpoints (chatbot, suggestions)
+│   │   │   │   ├── service.py         # AiService — public interface (10 touchpoints)
+│   │   │   │   ├── resume_parser.py   # AI-1: Resume Deep Analyzer
+│   │   │   │   ├── mentor_matcher.py  # AI-2: Mentor Match Engine
+│   │   │   │   ├── risk_profiler.py   # AI-3: Eligibility & Risk Profiler
+│   │   │   │   ├── duplicate_detector.py # AI-4: Duplicate Detection
+│   │   │   │   ├── bottleneck_predictor.py # AI-5
+│   │   │   │   ├── form_assistant.py  # AI-6: Joining Form Assistant
+│   │   │   │   ├── compliance_checker.py # AI-7: Pre-Start Compliance
+│   │   │   │   ├── cert_generator.py  # AI-8: Certificate Content
+│   │   │   │   ├── program_chatbot.py # AI-9: Program Intelligence
+│   │   │   │   ├── auto_router.py     # AI-10: Workflow Auto-Router
+│   │   │   │   ├── models.py          # AiParseResult SQLAlchemy model
+│   │   │   │   └── schemas.py
+│   │   │   │
+│   │   │   ├── workflow/
+│   │   │   │   ├── state_machine.py   # Master FSM — all valid transitions + guards
+│   │   │   │   ├── sla_service.py     # SLA clock start/stop/breach detection
+│   │   │   │   ├── escalation_service.py # Escalation rules + triggers
+│   │   │   │   ├── nda_timeout_job.py # APScheduler: check_nda_timeouts()
+│   │   │   │   ├── compliance_job.py  # APScheduler: run_compliance_checks() T-48h
+│   │   │   │   ├── sla_breach_job.py  # APScheduler: check_sla_breaches() hourly
+│   │   │   │   └── event_handlers.py  # All @event_handler registrations
+│   │   │   │
+│   │   │   ├── notification/
+│   │   │   │   ├── router.py
+│   │   │   │   ├── service.py         # NotificationService + GmailApiClient
+│   │   │   │   ├── template_renderer.py # Jinja2 template rendering
+│   │   │   │   ├── retry_job.py       # APScheduler: retry failed sends
+│   │   │   │   ├── event_handlers.py  # Listens to all publishable events
+│   │   │   │   ├── models.py          # Notification SQLAlchemy model
+│   │   │   │   ├── schemas.py
+│   │   │   │   └── templates/         # Jinja2 .html email templates
+│   │   │   │       ├── congratulations.html
+│   │   │   │       ├── mentor_assignment.html
+│   │   │   │       ├── mentor_rejection.html
+│   │   │   │       ├── nda_reminder.html
+│   │   │   │       ├── nda_final_warning.html
+│   │   │   │       ├── auto_reject_candidate.html
+│   │   │   │       ├── offer_letter.html
+│   │   │   │       ├── closure_reminder.html
+│   │   │   │       └── certificate_delivery.html
+│   │   │   │
+│   │   │   ├── document/
+│   │   │   │   ├── router.py          # /documents/* endpoints
+│   │   │   │   ├── service.py         # DocumentService, AzureBlobService
+│   │   │   │   ├── opensign_client.py # OpenSign REST API client
+│   │   │   │   ├── nda_service.py     # NDA lifecycle management
+│   │   │   │   ├── pdf_generator.py   # Certificate + offer letter PDF (reportlab)
+│   │   │   │   ├── webhook_handler.py # /webhooks/opensign → processes events
+│   │   │   │   ├── retention_job.py   # APScheduler: anonymize expired docs
+│   │   │   │   ├── models.py          # Document, NdaRecord SQLAlchemy models
+│   │   │   │   └── schemas.py
+│   │   │   │
+│   │   │   └── admin/
+│   │   │       ├── router.py          # /admin/* endpoints
+│   │   │       ├── dashboard_service.py # Aggregation queries (read replica)
+│   │   │       ├── audit_service.py   # Audit trail query + export
+│   │   │       ├── sla_report_service.py
+│   │   │       ├── config_service.py  # Template + escalation config management
+│   │   │       ├── metrics_service.py # AI performance metrics
+│   │   │       └── schemas.py
+│   │   │
+│   │   ├── infrastructure/
+│   │   │   ├── database.py            # SQLAlchemy async engine + session factory
+│   │   │   ├── event_bus.py           # In-process async event bus implementation
+│   │   │   ├── scheduler.py           # APScheduler setup + job registration
+│   │   │   ├── redis_client.py        # Azure Cache for Redis client
+│   │   │   ├── azure_blob.py          # Blob Storage client + SAS token generation
+│   │   │   ├── azure_openai.py        # Azure OpenAI client + retry logic + cost tracking
+│   │   │   ├── azure_keyvault.py      # Key Vault secret resolution
+│   │   │   ├── gmail_client.py        # Gmail API OAuth2 client
+│   │   │   ├── opensign_client.py     # OpenSign REST API base client
+│   │   │   └── graph_api_client.py    # Microsoft Graph API AD client
+│   │   │
+│   │   └── middleware/
+│   │       ├── audit.py               # Immutable audit event on every request
+│   │       ├── auth.py                # JWT validation + RBAC enforcement
+│   │       ├── rate_limit.py          # Redis-backed rate limiting
+│   │       ├── error_handler.py       # Global exception → structured error response
+│   │       └── logging.py             # Structured JSON → Azure Application Insights
+│   │
+│   ├── migrations/                    # Alembic migration files
+│   │   ├── env.py
+│   │   └── versions/
+│   ├── tests/
+│   │   ├── unit/                      # Per-module unit tests (pytest + pytest-asyncio)
+│   │   │   ├── test_referral_validator.py
+│   │   │   ├── test_mentor_state_machine.py
+│   │   │   ├── test_nda_timeout_logic.py
+│   │   │   └── test_ai_duplicate_detection.py
+│   │   ├── integration/               # Testcontainers (PostgreSQL + Redis)
+│   │   │   ├── test_referral_workflow.py
+│   │   │   ├── test_mentor_assignment_flow.py
+│   │   │   └── test_nda_auto_rejection.py
+│   │   └── conftest.py
+│   ├── pyproject.toml                 # Dependencies (uv / poetry)
+│   ├── Dockerfile
+│   └── alembic.ini
+│
+├── infrastructure/                    # Azure Infrastructure as Code
+│   ├── bicep/
+│   │   ├── main.bicep                 # App Service, PostgreSQL, Redis, Blob, OpenAI
+│   │   ├── keyvault.bicep
+│   │   └── networking.bicep
+│   └── scripts/
+│       ├── opensign_deploy.sh         # Azure Container Instance for OpenSign
+│       └── seed_data.sql              # Initial roles, templates, config
+│
+├── .github/
+│   └── workflows/
+│       ├── backend_ci.yml             # pytest + ruff + mypy
+│       └── frontend_ci.yml            # vitest + eslint + tsc
+│
+└── README.md
+```
+
+---
+
+## 15. Assumptions & Open Questions
+
+### Confirmed Assumptions
+
+| # | Assumption | Source |
+|---|---|---|
+| A1 | Organization uses Microsoft Azure AD — SSO via OIDC | Confirmed by user |
+| A2 | AD provisioning via Microsoft Graph API (cloud AD) | Inferred from Azure AD SSO choice |
+| A3 | Single company deployment — no multi-tenancy | Confirmed by user |
+| A4 | 3-person development team | Confirmed by user |
+| A5 | Year of study: 2nd, 3rd, 4th only (not 1st, not graduated) | Confirmed by user (RULE-E1) |
+| A6 | Max 2 referrals per employee per college | Confirmed by user (RULE-E2) |
+| A7 | Mentor max 4 active mentees | Confirmed by user |
+| A8 | Mentor timeout: 3 calendar days → auto-reassign (not reject candidate) | Confirmed by user (Option A2) |
+| A9 | NDA timeout: Day 5 auto-reject with Day 1/2/3 reminders | Confirmed by user (Option B2) |
+| A10 | Azure OpenAI for all AI (GPT-4o) | Confirmed by user ("Azure AI") |
+| A11 | OpenSign self-hosted on Azure Container Instance | Confirmed by user |
+| A12 | Gmail API (Google Workspace) for email delivery | Confirmed by user |
+| A13 | Azure Blob Storage for all file storage | Confirmed by user |
+
+### Open Questions (Require Stakeholder Input Before Build)
+
+| # | Question | Impact |
+|---|---|---|
+| OQ1 | Who gets notified on auto-rejection — referrer only, or also candidate? | Notification template scope |
+| OQ2 | Can a rejected referral be re-submitted by the same referrer in the same cycle? | Duplicate detection logic |
+| OQ3 | What defines "business days" for SLA — Mon–Fri only? Are holidays excluded? | SLA calculation accuracy |
+| OQ4 | What is the maximum and minimum internship duration allowed? | Date validation rules |
+| OQ5 | Can a mentor reassignment happen after MENTOR_ACCEPTED (e.g., mentor falls ill)? | Post-acceptance state machine |
+| OQ6 | What is the approved NDA template — does Legal need to upload it before go-live? | OpenSign setup dependency |
+| OQ7 | Should the candidate be told WHY their referral was auto-rejected, or only that it was closed? | Notification content policy |
+| OQ8 | Can an intern have their end date extended more than once? | Extension state machine |
+
+---
+
+*NexHire System Blueprint v2.0 — Final*
+*Stack: React + TypeScript · Python FastAPI · PostgreSQL · Azure OpenAI · Azure AD · Gmail API · OpenSign · Azure Blob*
+*Architecture: Modular Monolith · AI Coverage: 75% · Team: 3 engineers*
