@@ -2835,3 +2835,1319 @@ class AuditPublisher:
 *NexHire System Blueprint v2.1 — Error Handling & Email Capture Added*
 *Stack: React + TypeScript · Python FastAPI · PostgreSQL · Azure OpenAI · Azure AD · Gmail API · OpenSign · Azure Blob*
 *Architecture: Modular Monolith · AI Coverage: 75% · Team: 3 engineers*
+
+---
+
+## 18. AI Automation Upgrades — HR Work Reduction
+
+> **Design Principle:** AI handles detection, validation, and execution for clean cases.
+> HR handles authorization only for borderline or flagged cases.
+> Every AI auto-decision is logged, auditable, and HR-recallable within a defined window.
+
+### 18.1 Revised Human vs AI Split
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│  NEXHIRE AI COVERAGE — REVISED                                      │
+├─────────────────────────────────────────────────────────────────────┤
+│                                                                     │
+│  AI-Driven (fully automated, no human needed)     ████████  52%    │
+│  • Eligibility checks                                               │
+│  • PAN-based duplicate detection (hard block)                       │
+│  • Fuzzy duplicate detection (soft block)                           │
+│  • Referral auto-approval (clean cases)                             │
+│  • Joining form auto-lock (clean cases)                             │
+│  • Non-Worker ID auto-generation (from PAN)                         │
+│  • SLA breach prediction + auto-escalation                          │
+│  • Pre-start compliance check + auto-escalation                     │
+│  • Offer letter auto-send (standard template)                       │
+│  • Certificate auto-generate + auto-send                            │
+│  • Workflow auto-routing                                             │
+│  • College cap enforcement                                           │
+│                                                                     │
+│  AI-Assisted (AI decides, human reviews borderline) ██████  33%    │
+│  • Resume deep analysis (HR sees flagged referrals only)            │
+│  • Joining form validation (HR sees flagged forms only)             │
+│  • Mentor matching (AI suggests, human picks)                       │
+│  • All communication drafts                                          │
+│  • Risk profiling                                                    │
+│  • Certificate citation generation                                   │
+│                                                                     │
+│  Human-Only (genuine judgment, accountability)     ████    15%     │
+│  • Borderline referral approval (flagged cases)                     │
+│  • Borderline joining form lock (flagged cases)                     │
+│  • Mentor accept/reject (personal responsibility)                   │
+│  • Non-Worker ID: HR still confirms in external system              │
+│    (NexHire generates ID; HR submits to HR identity system)         │
+│                                                                     │
+├─────────────────────────────────────────────────────────────────────┤
+│  🤖 Total AI Coverage:   85%  (up from 75%)                        │
+│  👤 Total Human Work:    15%  (down from 25%)                      │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### 18.2 PAN Card — System-Wide Integration
+
+#### 18.2.1 Where PAN is Captured
+
+```
+REFERRAL FORM — Step 1: Candidate Basics (NEW FIELD)
+  Field: PAN Card Number
+  Format validation: regex [A-Z]{5}[0-9]{4}[A-Z]{1}
+  Example: ABCDE1234F
+  Mandatory: YES
+  Stored: referrals.candidate_pan (encrypted at rest — AES-256)
+  Display: masked after save — "ABCDE****F" (first 5 + last 1 only)
+
+JOINING FORM — Section 4: Government IDs (EXISTING FIELD — now linked)
+  Same PAN field
+  Cross-validated against referral form PAN
+  IF mismatch → HIGH SEVERITY flag → HR review required
+  Upload: PAN card photo/scan (Azure Document Intelligence reads it)
+```
+
+#### 18.2.2 PAN-Based Duplicate Detection
+
+```python
+# app/modules/ai/duplicate_detector.py
+
+async def detect_duplicate_pan(pan_number: str) -> DuplicateResult:
+    """
+    PAN is a government-issued unique identifier.
+    Any PAN match is a certain duplicate — no fuzzy logic needed.
+    """
+    normalized_pan = pan_number.strip().upper()
+
+    # Validate PAN format first
+    if not re.match(r'^[A-Z]{5}[0-9]{4}[A-Z]{1}$', normalized_pan):
+        raise ValidationError(
+            code="INVALID_PAN_FORMAT",
+            user_message="PAN card number format is invalid. "
+                         "Expected format: ABCDE1234F"
+        )
+
+    # Query all non-terminal referrals
+    existing = await db.query("""
+        SELECT id, candidate_name, candidate_pan,
+               status, created_at, submitted_at
+        FROM referrals
+        WHERE candidate_pan = :pan
+        AND status NOT IN ('HR_REJECTED', 'CANDIDATE_REJECTED',
+                           'NDA_TIMEOUT_REJECTED', 'NDA_DECLINED_REJECTED')
+    """, pan=encrypt(normalized_pan))
+
+    if existing:
+        return DuplicateResult(
+            is_duplicate=True,
+            match_id=existing.id,
+            match_type="PAN_EXACT",
+            similarity_score=1.0,           # 100% certain
+            match_reason="PAN card number exact match",
+            recommendation="HARD_BLOCK",    # No override allowed
+            existing_status=existing.status,
+            existing_referral_ref=existing.id
+        )
+
+    # No PAN match — run fuzzy fallback
+    return await detect_duplicate_fuzzy(pan_number=pan_number)
+
+
+async def detect_duplicate_fuzzy(pan_number: str, ...) -> DuplicateResult:
+    """Existing fuzzy matching — email + phone + name."""
+    # ... existing algorithm unchanged
+    # Only runs if PAN check passes (no PAN match found)
+```
+
+**UI Behavior on PAN match:**
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│  ⛔ HARD BLOCK — Duplicate PAN Detected                             │
+│                                                                      │
+│  PAN ABCDE1234F is already linked to an active referral:            │
+│  Riya Sharma — Referral #2025-0142 (Status: ACTIVE)                │
+│                                                                      │
+│  PAN cards are unique government identifiers.                       │
+│  This candidate cannot be referred again while the previous         │
+│  referral is active.                                                 │
+│                                                                      │
+│  [View Existing Referral]    [Cancel This Submission]               │
+│                                                                      │
+│  Note: Override is not available for PAN duplicates.                │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+#### 18.2.3 PAN-Based Non-Worker ID Generation
+
+```python
+# app/modules/ai/non_worker_id_generator.py
+
+class NonWorkerIdGenerator:
+    """
+    Generates deterministic, unique Non-Worker IDs from PAN number.
+    No LLM needed — pure deterministic function.
+    """
+
+    ID_PREFIX = "NW"
+
+    def generate(self, pan_number: str, joining_year: int) -> str:
+        """
+        Format: NW-{PAN}-{YEAR}
+        Example: NW-ABCDE1234F-2025
+
+        Properties:
+          - Globally unique (PAN is unique per person in India)
+          - Year-scoped (same person, different year = different ID)
+          - Traceable (PAN embedded, HR can reverse-lookup)
+          - Deterministic (same input = same output always)
+        """
+        pan_normalized = pan_number.strip().upper()
+
+        # Validate PAN format
+        if not re.match(r'^[A-Z]{5}[0-9]{4}[A-Z]{1}$', pan_normalized):
+            raise ValidationError(
+                code="INVALID_PAN_FORMAT",
+                user_message="Cannot generate Non-Worker ID: PAN format is invalid."
+            )
+
+        non_worker_id = f"{self.ID_PREFIX}-{pan_normalized}-{joining_year}"
+
+        # Uniqueness check (edge case: same person, same year, different referral)
+        existing = db.query(
+            "SELECT id FROM interns WHERE non_worker_id = :id",
+            id=non_worker_id
+        )
+        if existing:
+            # Append sequence suffix: NW-ABCDE1234F-2025-2
+            sequence = db.query(
+                "SELECT COUNT(*) FROM interns WHERE non_worker_id LIKE :pattern",
+                pattern=f"{non_worker_id}%"
+            )
+            non_worker_id = f"{non_worker_id}-{sequence + 1}"
+
+        return non_worker_id
+
+    async def generate_and_assign(self, intern_id: UUID,
+                                   pan_number: str,
+                                   joining_year: int) -> str:
+        """
+        Full flow: generate ID → validate uniqueness → store → publish event.
+        Triggered automatically on JoiningFormLocked event.
+        """
+        non_worker_id = self.generate(pan_number, joining_year)
+
+        # Store
+        await intern_repo.update(intern_id, non_worker_id=non_worker_id)
+
+        # Audit log
+        await audit_publisher.publish(AuditEvent(
+            event_type="NON_WORKER_ID_AUTO_GENERATED",
+            entity_type="INTERN",
+            entity_id=intern_id,
+            payload={
+                "non_worker_id": non_worker_id,
+                "generated_from": "PAN_NUMBER",
+                "pan_masked": f"{pan_number[:5]}****{pan_number[-1]}",
+                "joining_year": joining_year,
+                "generated_at": utcnow().isoformat()
+            }
+        ))
+
+        # Publish event → workflow continues
+        await event_bus.publish(NonWorkerIdAutoGenerated(
+            intern_id=intern_id,
+            non_worker_id=non_worker_id
+        ))
+
+        return non_worker_id
+```
+
+**Trigger point:**
+```python
+# app/modules/workflow/event_handlers.py
+
+@event_handler(JoiningFormLocked)
+async def on_joining_form_locked(event: JoiningFormLocked):
+    """
+    BEFORE: Created task for HR to manually create Non-Worker ID
+    AFTER:  AI generates it immediately — no HR task needed
+    """
+    intern = await intern_repo.get_by_referral(event.referral_id)
+    pan    = await referral_repo.get_pan(event.referral_id)  # decrypted
+
+    # Auto-generate Non-Worker ID immediately
+    non_worker_id = await non_worker_id_generator.generate_and_assign(
+        intern_id=intern.id,
+        pan_number=pan,
+        joining_year=intern.actual_start_date.year
+    )
+
+    # No HR task created — workflow continues automatically
+    logger.info("non_worker_id_auto_generated",
+                intern_id=intern.id,
+                non_worker_id=non_worker_id)
+```
+
+### 18.3 AI Auto-Approval Engine (Referral Review)
+
+```python
+# app/modules/ai/auto_approval_engine.py
+
+class ReferralAutoApprovalEngine:
+    """
+    Evaluates referrals against clean-case criteria.
+    Clean cases: auto-approved, no HR involvement.
+    Borderline cases: routed to HR with AI recommendation pre-filled.
+    """
+
+    # Thresholds for auto-approval
+    THRESHOLDS = {
+        "max_duplicate_score":         0.0,    # PAN must be clear (0 = no fuzzy match)
+        "max_risk_score":              25,     # Low risk only
+        "min_ai_parse_confidence":     0.82,   # High confidence parse
+        "required_field_completeness": 1.0,    # All mandatory fields present
+        "max_fuzzy_duplicate_score":   0.59,   # Below warn threshold
+    }
+
+    async def evaluate(self, referral_id: UUID) -> AutoApprovalResult:
+        referral    = await referral_repo.get(referral_id)
+        ai_parse    = await ai_parse_repo.get_by_referral(referral_id)
+        risk        = await risk_repo.get_by_referral(referral_id)
+        dup_check   = ai_parse.duplicate_check
+
+        flags = []
+
+        # CHECK 1: PAN duplicate (hard block — cannot auto-approve)
+        if dup_check.get("match_type") == "PAN_EXACT":
+            return AutoApprovalResult(
+                decision="HARD_BLOCK",
+                reason="PAN_DUPLICATE",
+                route_to_hr=True,
+                hr_recommendation="REJECT",
+                flags=["Definite duplicate — same PAN card"]
+            )
+
+        # CHECK 2: Fuzzy duplicate score
+        if dup_check.get("similarity_score", 0) > self.THRESHOLDS["max_fuzzy_duplicate_score"]:
+            flags.append(f"Possible duplicate (score: {dup_check['similarity_score']:.0%})")
+
+        # CHECK 3: Risk score
+        if risk.risk_score > self.THRESHOLDS["max_risk_score"]:
+            flags.append(f"Risk score {risk.risk_score} exceeds threshold (25)")
+
+        # CHECK 4: AI parse confidence
+        low_confidence_fields = [
+            field for field, score
+            in ai_parse.confidence_scores.items()
+            if score < self.THRESHOLDS["min_ai_parse_confidence"]
+        ]
+        if low_confidence_fields:
+            flags.append(f"Low confidence on: {', '.join(low_confidence_fields)}")
+
+        # CHECK 5: Field completeness
+        missing = referral_validator.get_missing_mandatory_fields(referral)
+        if missing:
+            flags.append(f"Missing fields: {', '.join(missing)}")
+
+        # CHECK 6: Red flags from AI resume analysis
+        if ai_parse.raw_output.get("red_flags"):
+            flags.extend(ai_parse.raw_output["red_flags"])
+
+        # DECISION
+        if not flags:
+            # ✅ CLEAN CASE — Auto-approve
+            return AutoApprovalResult(
+                decision="AUTO_APPROVE",
+                route_to_hr=False,
+                auto_approved_at=utcnow(),
+                conditions_met=[
+                    "No duplicate detected",
+                    "Risk score within threshold",
+                    "High confidence parse",
+                    "All mandatory fields present",
+                    "No red flags"
+                ]
+            )
+        else:
+            # ⚠️ BORDERLINE — Route to HR with recommendation
+            hr_recommendation = self._compute_hr_recommendation(flags, risk, dup_check)
+            return AutoApprovalResult(
+                decision="ROUTE_TO_HR",
+                route_to_hr=True,
+                flags=flags,
+                hr_recommendation=hr_recommendation,
+                ai_summary=await self._generate_hr_summary(referral, flags,
+                                                             hr_recommendation)
+            )
+
+    def _compute_hr_recommendation(self, flags, risk, dup_check) -> str:
+        """AI pre-fills what it would recommend HR to do."""
+        if dup_check.get("similarity_score", 0) > 0.85:
+            return "LIKELY_REJECT"
+        if risk.risk_score > 40:
+            return "REVIEW_CAREFULLY"
+        if len(flags) == 1 and "Low confidence" in flags[0]:
+            return "LIKELY_APPROVE"
+        return "REQUIRES_REVIEW"
+```
+
+**HR Dashboard experience (borderline only):**
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│  📋 Referrals Requiring Your Review  (3 of 18 total)                │
+│  ─────────────────────────────────────────────────────────────────  │
+│                                                                      │
+│  ✅ 15 referrals auto-approved by AI — no action needed             │
+│                                                                      │
+│  ⚠️  Riya Sharma         AI Recommendation: LIKELY_APPROVE          │
+│      Flag: Low confidence on phone field (74%)                      │
+│      [Review]                                                        │
+│                                                                      │
+│  ⚠️  Karan Patel         AI Recommendation: REVIEW_CAREFULLY        │
+│      Flags: Risk score 38, college 280km from office                │
+│      [Review]                                                        │
+│                                                                      │
+│  🚨 Priya Nair           AI Recommendation: LIKELY_REJECT           │
+│      Flag: Possible duplicate — 87% match with #2024-0142           │
+│      [Review]                                                        │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+### 18.4 AI Auto-Lock Engine (Joining Form)
+
+```python
+# app/modules/ai/form_auto_lock_engine.py
+
+class JoiningFormAutoLockEngine:
+    """
+    Validates joining form cross-field consistency using AI document verification.
+    Clean forms: auto-locked immediately.
+    Flagged forms: routed to HR with specific issues highlighted.
+    """
+
+    async def evaluate(self, intern_id: UUID) -> FormLockResult:
+        form       = await joining_form_repo.get_by_intern(intern_id)
+        referral   = await referral_repo.get_by_intern(intern_id)
+        documents  = await document_repo.get_by_intern(intern_id)
+
+        flags = []
+        severity = "NONE"
+
+        # VALIDATION 1: Name consistency
+        name_on_referral = normalize_name(referral.candidate_name)
+        name_on_form     = normalize_name(form.personal_details["full_name"])
+        name_on_id       = await self._extract_name_from_id(documents)
+
+        name_sim_referral = jaro_winkler(name_on_referral, name_on_form)
+        name_sim_id       = jaro_winkler(name_on_form, name_on_id) if name_on_id else 1.0
+
+        if name_sim_referral < 0.85 or name_sim_id < 0.85:
+            flags.append(FormFlag(
+                field="full_name",
+                severity="HIGH",
+                message=f"Name mismatch: referral='{referral.candidate_name}', "
+                        f"form='{form.personal_details['full_name']}', "
+                        f"ID='{name_on_id}'"
+            ))
+
+        # VALIDATION 2: PAN consistency
+        pan_on_referral = referral.candidate_pan
+        pan_on_form     = form.govt_ids.get("pan_number", "")
+        pan_on_id       = await self._extract_pan_from_id_doc(documents)
+
+        if pan_on_referral != pan_on_form:
+            flags.append(FormFlag(
+                field="pan_number",
+                severity="HIGH",
+                message="PAN number in joining form differs from referral form."
+            ))
+
+        if pan_on_id and pan_on_id != pan_on_form:
+            flags.append(FormFlag(
+                field="pan_number",
+                severity="HIGH",
+                message="PAN number on uploaded ID card differs from entered PAN."
+            ))
+
+        # VALIDATION 3: DOB consistency
+        dob_form = form.personal_details.get("date_of_birth")
+        dob_id   = await self._extract_dob_from_id(documents)
+        if dob_id and dob_form != dob_id:
+            flags.append(FormFlag(
+                field="date_of_birth",
+                severity="HIGH",
+                message=f"DOB mismatch: form={dob_form}, ID document={dob_id}"
+            ))
+
+        # VALIDATION 4: Completeness
+        missing = self._check_mandatory_fields(form)
+        for field in missing:
+            flags.append(FormFlag(field=field, severity="HIGH",
+                                   message=f"Mandatory field missing: {field}"))
+
+        # VALIDATION 5: Education certificate vs form
+        cert_institution = await self._extract_institution_from_cert(documents)
+        form_institution = form.education_history[0].get("institution", "") \
+                           if form.education_history else ""
+        if cert_institution:
+            sim = jaro_winkler(normalize(cert_institution),
+                               normalize(form_institution))
+            if sim < 0.75:
+                flags.append(FormFlag(
+                    field="education_history",
+                    severity="LOW",
+                    message=f"Institution name slightly differs: "
+                            f"form='{form_institution}', cert='{cert_institution}'"
+                ))
+
+        # DECISION
+        high_flags = [f for f in flags if f.severity == "HIGH"]
+        low_flags  = [f for f in flags if f.severity == "LOW"]
+
+        if not high_flags:
+            if not low_flags:
+                # ✅ CLEAN — Auto-lock
+                return FormLockResult(
+                    decision="AUTO_LOCK",
+                    route_to_hr=False,
+                    locked_by="AI_AUTO_LOCK",
+                    locked_at=utcnow()
+                )
+            else:
+                # Minor issues only — auto-lock with notes
+                return FormLockResult(
+                    decision="AUTO_LOCK_WITH_NOTES",
+                    route_to_hr=False,
+                    low_flags=low_flags,
+                    locked_by="AI_AUTO_LOCK",
+                    locked_at=utcnow(),
+                    note="Minor inconsistencies noted but not blocking."
+                )
+        else:
+            # ❌ HIGH severity — route to HR
+            return FormLockResult(
+                decision="ROUTE_TO_HR",
+                route_to_hr=True,
+                high_flags=high_flags,
+                low_flags=low_flags,
+                hr_summary=await self._generate_hr_summary(high_flags)
+            )
+```
+
+### 18.5 AI Auto-Send: Offer Letter & Certificate
+
+```python
+# app/modules/ai/auto_send_engine.py
+
+class OfferLetterAutoSendEngine:
+    """Auto-sends offer letter if standard template applies."""
+
+    RECALL_WINDOW_MINUTES = 30
+
+    async def evaluate_and_send(self, intern_id: UUID):
+        intern   = await intern_repo.get(intern_id)
+        letter   = await document_repo.get_offer_letter(intern_id)
+        referral = await referral_repo.get_by_intern(intern_id)
+
+        # Check: is this a standard case?
+        is_standard = (
+            letter.generated_from_template == True and
+            letter.custom_edits_count == 0 and
+            all([
+                intern.non_worker_id,
+                intern.actual_start_date,
+                referral.mentor_id,
+                referral.project_title
+            ])
+        )
+
+        if is_standard:
+            # Auto-send
+            await notification_service.send(
+                template_id="NOTIF_010_OFFER_LETTER",
+                recipient=referral.candidate_email,
+                attachments=[letter.blob_key]
+            )
+
+            # HR gets FYI (not action required)
+            await notification_service.send(
+                template_id="NOTIF_011_OFFER_LETTER_FYI_HR",
+                recipient=assigned_hr.email,
+                context={
+                    "candidate_name": referral.candidate_name,
+                    "sent_at": utcnow(),
+                    "recall_until": utcnow() + timedelta(minutes=self.RECALL_WINDOW_MINUTES),
+                    "recall_link": generate_recall_token(intern_id, "OFFER_LETTER")
+                }
+            )
+
+            await audit_publisher.publish(AuditEvent(
+                event_type="OFFER_LETTER_AUTO_SENT",
+                payload={"intern_id": intern_id, "sent_by": "AI_AUTO_SEND"}
+            ))
+        else:
+            # Non-standard → route to HR
+            await self._route_to_hr(intern_id, reason="custom_template_used")
+
+
+class CertificateAutoSendEngine:
+    """Auto-generates and sends certificate for clean closures."""
+
+    RECALL_WINDOW_HOURS = 48
+
+    async def evaluate_and_send(self, intern_id: UUID):
+        intern   = await intern_repo.get(intern_id)
+        referral = await referral_repo.get_by_intern(intern_id)
+
+        is_clean_closure = (
+            intern.status == InternStatus.CLOSURE_PENDING and
+            referral.status != ReferralStatus.TERMINATED and
+            intern.mentor_confirmed_completion == True
+        )
+
+        if is_clean_closure:
+            # AI-8 generates certificate content
+            citation = await ai_service.generate_certificate(intern_id)
+
+            if citation.confidence >= 0.85:
+                # Generate PDF on letterhead
+                pdf_key = await certificate_generator.generate(intern_id, citation)
+
+                # Send to candidate
+                await notification_service.send(
+                    template_id="NOTIF_007_CERTIFICATE_DELIVERY",
+                    recipient=referral.candidate_email,
+                    attachments=[pdf_key]
+                )
+
+                # HR gets FYI + recall option
+                await notification_service.send(
+                    template_id="NOTIF_012_CERT_AUTO_SENT_FYI",
+                    recipient=assigned_hr.email,
+                    context={
+                        "recall_until": utcnow() + timedelta(hours=self.RECALL_WINDOW_HOURS),
+                        "recall_link": generate_recall_token(intern_id, "CERTIFICATE")
+                    }
+                )
+
+                await audit_publisher.publish(AuditEvent(
+                    event_type="CERTIFICATE_AUTO_SENT",
+                    payload={"intern_id": intern_id, "sent_by": "AI_AUTO_SEND",
+                             "citation_confidence": citation.confidence}
+                ))
+            else:
+                # Low confidence citation → HR reviews
+                await self._route_to_hr(intern_id, reason="low_citation_confidence")
+        else:
+            # Terminated or disputed → HR handles
+            await self._route_to_hr(intern_id, reason="non_standard_closure")
+```
+
+### 18.6 Recall Mechanism (HR Safety Net)
+
+Every auto-action has a recall window where HR can undo it:
+
+```
+AUTO-APPROVE recall:   2 hours     → HR can revert to PENDING_REVIEW
+AUTO-LOCK recall:      1 hour      → HR can unlock and flag for review
+OFFER LETTER recall:   30 minutes  → HR can retract (candidate gets "disregard" email)
+CERTIFICATE recall:    48 hours    → HR can invalidate (candidate notified)
+
+Recall is available via:
+  1. Email link in HR's FYI notification
+  2. S11 HR Dashboard → "Recent AI Actions" panel → [Recall] button
+
+After recall window closes:
+  Action is permanent
+  Audit event: AI_ACTION_RECALL_WINDOW_CLOSED logged
+```
+
+### 18.7 Updated Data Schema — PAN Card
+
+```sql
+-- Add PAN to referrals table
+ALTER TABLE referrals
+  ADD COLUMN candidate_pan VARCHAR(255),     -- encrypted AES-256
+  ADD COLUMN candidate_pan_masked VARCHAR(20); -- "ABCDE****F" for display
+
+-- Unique constraint on PAN for active referrals
+CREATE UNIQUE INDEX idx_referrals_active_pan
+  ON referrals(candidate_pan)
+  WHERE status NOT IN (
+    'HR_REJECTED', 'CANDIDATE_REJECTED',
+    'NDA_TIMEOUT_REJECTED', 'NDA_DECLINED_REJECTED', 'TERMINATED'
+  );
+
+-- AI auto-action log
+CREATE TABLE ai_auto_actions (
+  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  intern_id        UUID REFERENCES interns(id),
+  referral_id      UUID REFERENCES referrals(id),
+  action_type      VARCHAR(50) NOT NULL,  -- AUTO_APPROVE, AUTO_LOCK,
+                                          --   AUTO_SEND_OFFER, AUTO_SEND_CERT,
+                                          --   AUTO_GENERATE_NW_ID
+  decision         VARCHAR(50) NOT NULL,  -- EXECUTED, ROUTED_TO_HR
+  conditions_met   JSONB,                 -- what passed
+  flags            JSONB,                 -- what was flagged (if routed)
+  hr_recommendation VARCHAR(50),          -- LIKELY_APPROVE, LIKELY_REJECT, etc.
+  executed_at      TIMESTAMPTZ DEFAULT NOW(),
+  recalled_at      TIMESTAMPTZ,           -- if HR recalled
+  recalled_by      UUID REFERENCES users(id),
+  recall_reason    TEXT
+);
+```
+
+### 18.8 Updated Referral Form — PAN Field
+
+```
+REFERRAL FORM — Step 1: Candidate Basics (UPDATED)
+
+Fields:
+  1. Upload Resume (existing — AI-1 fires)
+  2. Candidate Full Name (AI prefilled)
+  3. Candidate Email (AI prefilled)
+  4. Candidate Phone (AI prefilled)
+  5. [NEW] PAN Card Number
+       - Input: text field with mask (shows as typed, stored encrypted)
+       - Validation: real-time regex [A-Z]{5}[0-9]{4}[A-Z]{1}
+       - On valid PAN entered: duplicate check fires immediately (not on submit)
+         Response within 1 second:
+           CLEAR  → green tick shown
+           MATCH  → red banner: "HARD BLOCK — PAN already in system"
+       - Stored as: encrypted (AES-256), displayed masked after save
+  6. Year of Study (existing — RULE-E1 fires)
+  7. College Name (existing — RULE-E2 fires)
+  8. Graduation Year (existing)
+```
+
+### 18.9 Revised Master Workflow — AI-Automated Steps
+
+```
+OLD STEP → NEW STEP
+
+Step 5  (HR reviews referral)
+  OLD: HR reviews ALL referrals → approve/reject
+  NEW: AI evaluates ALL referrals
+       Clean (no flags) → AUTO-APPROVED instantly
+       Flagged → routed to HR with pre-filled recommendation
+       HR sees only ~15–20% of referrals
+
+Step 7  (Joining form — HR locks)
+  OLD: HR reviews ALL forms → clicks Lock
+  NEW: AI validates ALL forms (name, PAN, DOB, docs cross-check)
+       Clean → AUTO-LOCKED instantly
+       Flagged (HIGH severity) → routed to HR
+       HR sees only ~20–25% of forms
+
+Step 8  (Non-Worker ID creation — HR manually creates)
+  OLD: HR creates ID manually in external system → SLA 1 business day
+  NEW: AI generates NW-{PAN}-{YEAR} automatically on JoiningFormLocked event
+       Generated in < 1 second
+       SLA: near-instant (no more 1-day wait)
+       HR notified as FYI (not action)
+
+Step 10 (Offer letter — HR reviews and sends)
+  OLD: HR reviews ALL letters → sends
+  NEW: Standard template → AUTO-SENT (30-min recall window for HR)
+       Custom cases → HR reviews
+
+Step 21 (Certificate — HR reviews and approves)
+  OLD: HR reviews ALL certificates → approves → sends
+  NEW: Clean closure → AUTO-GENERATED + AUTO-SENT (48h recall window)
+       Terminated / disputed → HR handles
+```
+
+---
+
+*NexHire System Blueprint v2.2 — AI Automation Upgrades + PAN Card Integration*
+*AI Coverage: 85% · HR Work: 15% · PAN-based deduplication + Non-Worker ID generation*
+
+---
+
+## 19. Variable Cooling Period System
+
+> **Design Principle:** Cooling periods are proportional to the candidate's responsibility
+> for the terminal outcome. Where the candidate had no control (mentor unavailability),
+> no penalty is applied. Where the candidate actively disengaged, a longer period applies.
+> All durations are hardcoded via DB seed migration — intentional, version-controlled,
+> requires a code review to change.
+
+### 19.1 Cooling Period Matrix (Final — All Specs Confirmed)
+
+| Terminal State | Duration | Responsibility | Reasoning |
+|---|---|---|---|
+| `NDA_DECLINED_REJECTED` | **6 months** | Candidate | Explicitly refused a legal document — strong disengagement signal |
+| `TERMINATED` | **6 months** | Candidate | Left mid-internship — reliability and commitment concern |
+| `NDA_TIMEOUT_REJECTED` | **3 months** | Candidate | Did not respond for 5 days — moderate disengagement |
+| `HR_REJECTED` | **3 months** | Shared | HR found profile unfit — time for profile improvement |
+| `CANDIDATE_REJECTED` | **0 months** | System | 3 mentors unavailable — not candidate's fault, no penalty |
+| `CLOSED` (re-join) | **3 months** | None | Healthy spacing between internship cycles |
+
+### 19.2 Cooling Period Configuration (DB-Seeded — Not UI-Editable)
+
+```sql
+-- Seeded via Alembic migration — NOT editable via UI
+-- To change: write new migration, code review required, version-controlled
+
+CREATE TABLE cooling_period_config (
+    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    terminal_state   VARCHAR(50) NOT NULL UNIQUE,
+    duration_months  SMALLINT NOT NULL,    -- 0 = no cooling period
+    description      TEXT NOT NULL,        -- human-readable reason
+    is_active        BOOLEAN DEFAULT true,
+    created_at       TIMESTAMPTZ DEFAULT NOW(),
+    updated_at       TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Seed data (inserted via Alembic migration: 0005_seed_cooling_periods.py)
+INSERT INTO cooling_period_config
+  (terminal_state, duration_months, description) VALUES
+  ('NDA_DECLINED_REJECTED', 6,
+   'Candidate explicitly declined NDA — 6-month cooling period.'),
+  ('TERMINATED',            6,
+   'Candidate left mid-internship — 6-month cooling period.'),
+  ('NDA_TIMEOUT_REJECTED',  3,
+   'Candidate did not sign NDA within 5 days — 3-month cooling period.'),
+  ('HR_REJECTED',           3,
+   'HR found candidate unfit — 3-month cooling period.'),
+  ('CANDIDATE_REJECTED',    0,
+   'Mentor unavailability — no cooling period applied.'),
+  ('CLOSED',                3,
+   'Successful completion — 3-month spacing before re-joining.');
+
+-- Application role: SELECT only
+-- To update durations: write new Alembic migration
+--   → code review required → git history preserved → deliberate change
+REVOKE INSERT, UPDATE, DELETE ON cooling_period_config FROM nexhire_app;
+GRANT SELECT ON cooling_period_config TO nexhire_app;
+```
+
+**Why DB-seeded and not UI-configurable:**
+- Changes to cooling periods are policy decisions — not operational ones
+- Require deliberate code review + migration (prevents accidental changes)
+- Full version history preserved in git (every change traceable to a PR)
+- `is_active` flag allows disabling a rule without deletion (migration can toggle)
+
+### 19.3 Cooling Period DB Schema
+
+```sql
+-- Cooling period tracking on referrals
+ALTER TABLE referrals
+  ADD COLUMN cooling_period_months    SMALLINT,
+  ADD COLUMN cooling_period_start_at  TIMESTAMPTZ,
+  ADD COLUMN cooling_period_end_at    TIMESTAMPTZ,
+  ADD COLUMN cooling_triggered_by     VARCHAR(50),  -- terminal state name
+  ADD COLUMN cooling_override_at      TIMESTAMPTZ,
+  ADD COLUMN cooling_override_by      UUID REFERENCES users(id),
+  ADD COLUMN cooling_override_reason  TEXT;
+
+-- Index for fast PAN + cooling period lookups
+CREATE INDEX idx_referrals_pan_cooling
+  ON referrals(candidate_pan, cooling_period_end_at)
+  WHERE cooling_period_end_at IS NOT NULL;
+
+-- Cooling period override audit (separate table for clean querying)
+CREATE TABLE cooling_period_overrides (
+    id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    referral_id         UUID NOT NULL REFERENCES referrals(id),
+    new_referral_id     UUID REFERENCES referrals(id),  -- referral that bypassed
+    candidate_pan_masked VARCHAR(20) NOT NULL,
+    original_end_date   DATE NOT NULL,
+    overridden_at       TIMESTAMPTZ DEFAULT NOW(),
+    overridden_by       UUID NOT NULL REFERENCES users(id),
+    override_reason     TEXT NOT NULL,
+    CHECK (length(override_reason) >= 50)  -- minimum 50 chars — must be meaningful
+);
+```
+
+### 19.4 Cooling Period Business Rules (RULE-CP Series)
+
+```
+RULE-CP1: NDA Declined — 6 Month Cooling Period
+  Trigger:  referral.status transitions to NDA_DECLINED_REJECTED
+  Action:   Set cooling_period_months = 6
+            cooling_period_start_at = NOW()
+            cooling_period_end_at = NOW() + INTERVAL '6 months'
+            cooling_triggered_by = 'NDA_DECLINED_REJECTED'
+  Block:    Any new referral for same PAN before cooling_period_end_at
+
+RULE-CP2: Terminated — 6 Month Cooling Period
+  Trigger:  referral.status transitions to TERMINATED
+  Action:   Same as CP1 with duration = 6 months
+
+RULE-CP3: NDA Timeout — 3 Month Cooling Period
+  Trigger:  referral.status transitions to NDA_TIMEOUT_REJECTED
+  Action:   Same as CP1 with duration = 3 months
+
+RULE-CP4: HR Rejected — 3 Month Cooling Period
+  Trigger:  referral.status transitions to HR_REJECTED
+  Action:   Same as CP1 with duration = 3 months
+
+RULE-CP5: Candidate Rejected (Mentor Unavailability) — No Cooling Period
+  Trigger:  referral.status transitions to CANDIDATE_REJECTED
+  Action:   cooling_period_months = 0
+            No block on new referral — can be re-referred immediately
+            cooling_triggered_by = 'CANDIDATE_REJECTED'
+            (recorded for history, not enforcement)
+
+RULE-CP6: Closed (Re-join) — 3 Month Cooling Period
+  Trigger:  referral.status transitions to CLOSED
+  Action:   Same as CP1 with duration = 3 months
+            Cooling starts from actual_end_date (not closure processing date)
+
+RULE-CP7: Program Owner Override
+  Trigger:  Program Owner initiates override for specific referral
+  Guard:    override_reason.length >= 50 characters (enforced by DB constraint)
+  Action:   cooling_period_end_at → NOW() (effectively ends cooling immediately)
+            cooling_override_at → NOW()
+            cooling_override_by → program_owner.id
+            cooling_override_reason → reason text
+            Record inserted to cooling_period_overrides table
+            Audit event: COOLING_PERIOD_OVERRIDDEN (immutable)
+            HR notified of override
+  Limit:    Program Owner role only — HR cannot override
+```
+
+### 19.5 Cooling Period Service
+
+```python
+# app/modules/referral/cooling_period_service.py
+
+from dataclasses import dataclass
+from datetime import date
+from uuid import UUID
+
+@dataclass
+class CoolingPeriodStatus:
+    is_in_cooling: bool
+    terminal_state: str | None       = None
+    cooling_start:  date | None      = None
+    cooling_end:    date | None      = None
+    days_remaining: int | None       = None
+    months_duration: int | None      = None
+    can_override:   bool             = False
+    override_applied: bool           = False
+
+
+class CoolingPeriodService:
+
+    async def get_status(self, pan_number: str) -> CoolingPeriodStatus:
+        """
+        Primary check: called whenever a PAN is entered in referral form.
+        Returns full cooling period status for a candidate identified by PAN.
+        """
+        # Find most recent terminal referral for this PAN
+        record = await db.query("""
+            SELECT r.status,
+                   r.cooling_period_months,
+                   r.cooling_period_start_at,
+                   r.cooling_period_end_at,
+                   r.cooling_triggered_by,
+                   r.cooling_override_at,
+                   r.actual_end_date
+            FROM referrals r
+            WHERE r.candidate_pan = :pan_encrypted
+            AND r.cooling_period_end_at IS NOT NULL
+            ORDER BY r.cooling_period_start_at DESC
+            LIMIT 1
+        """, pan_encrypted=encrypt(pan_number))
+
+        if not record:
+            return CoolingPeriodStatus(is_in_cooling=False)
+
+        # No cooling period for CANDIDATE_REJECTED
+        if record.cooling_period_months == 0:
+            return CoolingPeriodStatus(is_in_cooling=False)
+
+        # Override already applied — cooling ended early
+        if record.cooling_override_at:
+            return CoolingPeriodStatus(
+                is_in_cooling=False,
+                override_applied=True,
+                terminal_state=record.cooling_triggered_by
+            )
+
+        today = date.today()
+        cooling_end = record.cooling_period_end_at.date()
+
+        if today >= cooling_end:
+            # Cooling period naturally elapsed
+            return CoolingPeriodStatus(is_in_cooling=False)
+
+        days_remaining = (cooling_end - today).days
+
+        return CoolingPeriodStatus(
+            is_in_cooling=True,
+            terminal_state=record.cooling_triggered_by,
+            cooling_start=record.cooling_period_start_at.date(),
+            cooling_end=cooling_end,
+            days_remaining=days_remaining,
+            months_duration=record.cooling_period_months,
+            can_override=True  # Program Owner can override
+        )
+
+    async def apply_cooling_period(self,
+                                    referral_id: UUID,
+                                    terminal_state: str) -> None:
+        """
+        Called by WorkflowEngine when any terminal state is reached.
+        Looks up duration from cooling_period_config, sets dates.
+        """
+        config = await db.query("""
+            SELECT duration_months FROM cooling_period_config
+            WHERE terminal_state = :state AND is_active = true
+        """, state=terminal_state)
+
+        if not config:
+            # Unknown terminal state — log warning, no cooling applied
+            logger.warning("cooling_config_not_found",
+                           terminal_state=terminal_state)
+            return
+
+        duration_months = config.duration_months
+
+        if duration_months == 0:
+            # No cooling period — record for history only
+            await referral_repo.update(referral_id, {
+                "cooling_period_months": 0,
+                "cooling_period_start_at": utcnow(),
+                "cooling_period_end_at": utcnow(),  # immediately expired
+                "cooling_triggered_by": terminal_state
+            })
+            return
+
+        start = utcnow()
+        end   = add_months(start, duration_months)
+
+        await referral_repo.update(referral_id, {
+            "cooling_period_months":   duration_months,
+            "cooling_period_start_at": start,
+            "cooling_period_end_at":   end,
+            "cooling_triggered_by":    terminal_state
+        })
+
+        await audit_publisher.publish(AuditEvent(
+            event_type="COOLING_PERIOD_APPLIED",
+            entity_type="REFERRAL",
+            entity_id=referral_id,
+            payload={
+                "terminal_state":    terminal_state,
+                "duration_months":   duration_months,
+                "cooling_start":     start.isoformat(),
+                "cooling_end":       end.isoformat(),
+                "pan_masked":        get_masked_pan(referral_id)
+            }
+        ))
+
+    async def apply_override(self,
+                              original_referral_id: UUID,
+                              program_owner_id: UUID,
+                              reason: str,
+                              new_referral_id: UUID | None = None) -> None:
+        """
+        Program Owner overrides cooling period for exceptional cases.
+        Reason must be at least 50 characters (DB constraint enforced).
+        """
+        if len(reason.strip()) < 50:
+            raise ValidationError(
+                code="OVERRIDE_REASON_TOO_SHORT",
+                user_message="Override reason must be at least 50 characters. "
+                             "Please provide a detailed justification."
+            )
+
+        # Verify actor is Program Owner
+        actor = await user_repo.get(program_owner_id)
+        if actor.role != UserRole.PROGRAM_OWNER:
+            raise InsufficientPermissionsError()
+
+        # Apply override — cooling ends immediately
+        await referral_repo.update(original_referral_id, {
+            "cooling_period_end_at":     utcnow(),  # ends now
+            "cooling_override_at":       utcnow(),
+            "cooling_override_by":       program_owner_id,
+            "cooling_override_reason":   reason
+        })
+
+        # Record in override audit table
+        await cooling_override_repo.insert(CoolingPeriodOverride(
+            referral_id=original_referral_id,
+            new_referral_id=new_referral_id,
+            candidate_pan_masked=get_masked_pan(original_referral_id),
+            original_end_date=get_original_end_date(original_referral_id),
+            overridden_by=program_owner_id,
+            override_reason=reason
+        ))
+
+        # Immutable audit event
+        await audit_publisher.publish(AuditEvent(
+            event_type="COOLING_PERIOD_OVERRIDDEN",
+            actor_user_id=program_owner_id,
+            actor_role="PROGRAM_OWNER",
+            payload={
+                "original_referral_id":  str(original_referral_id),
+                "original_cooling_end":  get_original_end_date(original_referral_id),
+                "override_reason":       reason,
+                "pan_masked":            get_masked_pan(original_referral_id),
+                "overridden_at":         utcnow().isoformat()
+            }
+        ))
+
+        # Notify HR of override
+        await notification_service.send(
+            template_id="NOTIF_013_COOLING_OVERRIDE_HR",
+            recipient=hr_team_email,
+            context={
+                "overridden_by":    actor.full_name,
+                "reason":           reason,
+                "pan_masked":       get_masked_pan(original_referral_id),
+                "overridden_at":    utcnow()
+            }
+        )
+```
+
+### 19.6 Updated PAN Check — Full Decision Tree
+
+```python
+# app/modules/ai/duplicate_detector.py (updated)
+
+async def check_pan_full(pan_number: str,
+                          referrer_id: UUID) -> PanCheckResult:
+    """
+    Complete PAN check: active duplicate + cooling period.
+    Called in real-time as employee types PAN in referral form.
+    """
+
+    # STEP 1: Active duplicate check (highest priority)
+    active = await db.query("""
+        SELECT id, candidate_name, status
+        FROM referrals
+        WHERE candidate_pan = :pan
+        AND status NOT IN (
+          'HR_REJECTED','CANDIDATE_REJECTED',
+          'NDA_TIMEOUT_REJECTED','NDA_DECLINED_REJECTED',
+          'TERMINATED','CLOSED'
+        )
+        LIMIT 1
+    """, pan=encrypt(pan_number))
+
+    if active:
+        return PanCheckResult(
+            verdict="HARD_BLOCK",
+            block_type="ACTIVE_DUPLICATE",
+            message=f"An active referral already exists for this candidate "
+                    f"(Referral #{active.id[:8].upper()}, "
+                    f"Status: {active.status}).",
+            allow_override=False,
+            existing_referral_id=active.id
+        )
+
+    # STEP 2: Cooling period check
+    cooling = await cooling_period_service.get_status(pan_number)
+
+    if cooling.is_in_cooling:
+        terminal_labels = {
+            "NDA_DECLINED_REJECTED": "explicitly declined the NDA",
+            "TERMINATED":            "left mid-internship",
+            "NDA_TIMEOUT_REJECTED":  "did not sign NDA within the deadline",
+            "HR_REJECTED":           "was found unfit by HR review",
+            "CLOSED":                "completed a previous internship"
+        }
+        reason_text = terminal_labels.get(
+            cooling.terminal_state, "a previous referral was closed"
+        )
+
+        return PanCheckResult(
+            verdict="COOLING_BLOCK",
+            block_type="COOLING_PERIOD_ACTIVE",
+            terminal_state=cooling.terminal_state,
+            cooling_start=cooling.cooling_start,
+            cooling_end=cooling.cooling_end,
+            days_remaining=cooling.days_remaining,
+            months_duration=cooling.months_duration,
+            message=f"This candidate {reason_text}. "
+                    f"A {cooling.months_duration}-month cooling period applies.",
+            allow_override=True,   # Program Owner can override
+            override_role_required="PROGRAM_OWNER"
+        )
+
+    # STEP 3: Fuzzy duplicate check (existing candidates, no cooling period)
+    fuzzy = await detect_duplicate_fuzzy(pan_number=pan_number)
+
+    if fuzzy.is_duplicate:
+        return PanCheckResult(
+            verdict="WARN" if fuzzy.similarity_score < 0.9 else "SOFT_BLOCK",
+            block_type="FUZZY_DUPLICATE",
+            similarity_score=fuzzy.similarity_score,
+            match_reasons=fuzzy.match_reasons,
+            message="A possible duplicate candidate was found. HR will verify.",
+            allow_override=True
+        )
+
+    # STEP 4: All clear
+    return PanCheckResult(
+        verdict="CLEAR",
+        message="PAN verified — no existing referral or cooling period found."
+    )
+```
+
+### 19.7 UI — Cooling Period Blocks (Referral Form)
+
+```
+COOLING PERIOD ACTIVE — 6 months (NDA_DECLINED_REJECTED):
+┌──────────────────────────────────────────────────────────────────────┐
+│  ⏳ COOLING PERIOD ACTIVE — Cannot Refer                            │
+│                                                                      │
+│  Riya Sharma (PAN: ABCDE****F)                                      │
+│  Reason:          Candidate explicitly declined the NDA             │
+│  Period:          6 months                                           │
+│  Started:         12 Jan 2025                                        │
+│  Ends:            12 Jul 2025                                        │
+│  Days remaining:  47 days                                            │
+│                                                                      │
+│  You can submit a new referral after 12 Jul 2025.                   │
+│  [🔔 Remind me on 12 Jul 2025]                                      │
+│                                                                      │
+│  ── Program Owner only ────────────────────────────────────────     │
+│  [Request Cooling Period Override]  (requires justification)        │
+└──────────────────────────────────────────────────────────────────────┘
+
+COOLING PERIOD ACTIVE — 3 months (CLOSED re-join):
+┌──────────────────────────────────────────────────────────────────────┐
+│  ⏳ COOLING PERIOD ACTIVE — Re-join Not Yet Available               │
+│                                                                      │
+│  Riya Sharma (PAN: ABCDE****F)                                      │
+│  Reason:          Completed previous internship (re-join period)    │
+│  Period:          3 months                                           │
+│  Started:         15 Mar 2025                                        │
+│  Ends:            15 Jun 2025                                        │
+│  Days remaining:  18 days                                            │
+│                                                                      │
+│  Riya completed her previous internship successfully.               │
+│  She can re-join after the standard 3-month spacing period.         │
+│  [🔔 Remind me on 15 Jun 2025]                                      │
+└──────────────────────────────────────────────────────────────────────┘
+
+NO COOLING PERIOD (CANDIDATE_REJECTED):
+┌──────────────────────────────────────────────────────────────────────┐
+│  ✅ PAN Verified — Eligible for Re-referral                         │
+│                                                                      │
+│  Riya Sharma (PAN: ABCDE****F)                                      │
+│  Note: A previous referral was closed due to mentor unavailability. │
+│  No cooling period applies — this was not the candidate's fault.    │
+│  You may submit a new referral immediately.                         │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+### 19.8 Program Owner Override Flow (UI)
+
+```
+Program Owner visits S23 (Executive Dashboard) or S24 (Audit Report)
+  ↓
+Sees referral with COOLING_BLOCK status
+  ↓
+Clicks [Override Cooling Period]
+  ↓
+┌──────────────────────────────────────────────────────────────────────┐
+│  Override Cooling Period                                             │
+│  ─────────────────────────────────────────────────────────────────  │
+│  Candidate:       Riya Sharma (PAN: ABCDE****F)                    │
+│  Terminal state:  NDA_DECLINED_REJECTED                             │
+│  Cooling ends:    12 Jul 2025 (47 days remaining)                   │
+│                                                                      │
+│  ⚠️  This action is irreversible and will be permanently            │
+│      logged in the audit trail with your name and reason.           │
+│                                                                      │
+│  Justification (minimum 50 characters): *                           │
+│  ┌──────────────────────────────────────────────────────────────┐  │
+│  │ Candidate had a medical emergency during NDA period.         │  │
+│  │ HR verified hospital documentation. Exceptional case        │  │
+│  │ approved by department head.                                 │  │
+│  └──────────────────────────────────────────────────────────────┘  │
+│  Characters: 142 / minimum 50 ✅                                    │
+│                                                                      │
+│  [Cancel]                    [Confirm Override — Log Permanently]   │
+└──────────────────────────────────────────────────────────────────────┘
+  ↓
+On confirm:
+  cooling_period_end_at → NOW()
+  cooling_override_at, cooling_override_by, cooling_override_reason set
+  cooling_period_overrides record inserted
+  Audit event: COOLING_PERIOD_OVERRIDDEN (immutable)
+  HR notified via email
+  New referral can now be submitted immediately
+```
+
+### 19.9 Updated Auto-Approval Engine — Condition #7
+
+```python
+# Cooling period check added as condition 7 in ReferralAutoApprovalEngine
+
+# CHECK 7: Cooling period (should never reach here if UI blocks correctly,
+#           but server-side guard is essential — never trust client)
+cooling = await cooling_period_service.get_status(referral.candidate_pan)
+if cooling.is_in_cooling:
+    return AutoApprovalResult(
+        decision="HARD_BLOCK",
+        reason="COOLING_PERIOD_ACTIVE",
+        route_to_hr=False,  # Not an HR decision — system-enforced block
+        flags=[f"Candidate in {cooling.months_duration}-month cooling period. "
+               f"Ends: {cooling.cooling_end}. "
+               f"Triggered by: {cooling.terminal_state}"]
+    )
+```
+
+### 19.10 Cooling Period Notification Templates
+
+```
+NOTIF_014: Cooling Period Applied (to Referrer)
+  Trigger:  Any terminal state with cooling_period_months > 0
+  Content:  "The referral for [Candidate Name] has been closed.
+             A [N]-month cooling period has been applied starting [date].
+             You may submit a new referral for this candidate after [end_date]."
+  Action:   [Set Reminder] button → creates calendar reminder
+
+NOTIF_015: Cooling Period Ending Soon (to Referrer)
+  Trigger:  APScheduler — 7 days before cooling_period_end_at
+  Content:  "[Candidate Name]'s cooling period ends in 7 days ([date]).
+             You will be able to submit a new referral from [date]."
+
+NOTIF_016: Cooling Period Expired — Re-referral Available (to Referrer)
+  Trigger:  APScheduler — on cooling_period_end_at date
+  Content:  "[Candidate Name]'s cooling period has ended.
+             You may now submit a new referral."
+
+NOTIF_013: Cooling Period Overridden (to HR)
+  Trigger:  Program Owner override confirmed
+  Content:  "Program Owner [Name] has overridden the cooling period
+             for [Candidate PAN masked]. Reason: [reason].
+             A new referral may now be submitted immediately."
+```
+
+### 19.11 Cooling Period Report (S24 — Audit & SLA Report)
+
+```
+Program Owner sees on S24:
+
+COOLING PERIOD ANALYTICS
+─────────────────────────────────────────────────────────────────────
+Currently in cooling period:     12 candidates
+  → 6-month periods:              4  (NDA declined: 2, Terminated: 2)
+  → 3-month periods:              8  (Timeout: 3, HR rejected: 4, Re-join: 1)
+
+Cooling periods ending this month: 5
+  → Referrers notified:            5 ✅
+
+Historical override count:         2
+  → Last override:                 23 Mar 2025 by [Program Owner Name]
+
+CANDIDATE COOLING STATUS TABLE (filterable, exportable)
+  Candidate PAN    Terminal State          Started      Ends         Days Left
+  ABCDE****F       NDA_DECLINED_REJECTED   12 Jan 2025  12 Jul 2025  47
+  FGHIJ****K       HR_REJECTED             01 Mar 2025  01 Jun 2025  8
+  LMNOP****Q       CLOSED (re-join)        15 Mar 2025  15 Jun 2025  22
+  ...
+```
+
+---
+
+*NexHire System Blueprint v2.3 — Variable Cooling Period System Added*
+*AI Coverage: 85% · HR Work: 15% · 6 cooling period rules · Program Owner override*
