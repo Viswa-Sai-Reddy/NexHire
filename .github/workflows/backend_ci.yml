@@ -1,0 +1,71 @@
+name: backend-ci
+
+on:
+  push:
+    branches: [main]
+    paths: [backend/**, .github/workflows/backend_ci.yml]
+  pull_request:
+    paths: [backend/**, .github/workflows/backend_ci.yml]
+
+defaults:
+  run:
+    working-directory: backend
+
+jobs:
+  lint-typecheck-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: nexhire
+          POSTGRES_PASSWORD: nexhire
+          POSTGRES_DB: nexhire_test
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ["6379:6379"]
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql+asyncpg://nexhire:nexhire@localhost:5432/nexhire_test
+      REDIS_URL: redis://localhost:6379/0
+      NEXHIRE_ENV: development
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.5.0"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --frozen
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Format check
+        run: uv run ruff format --check .
+
+      - name: Type check
+        run: uv run mypy app
+
+      - name: Apply migrations
+        run: uv run alembic upgrade head
+
+      - name: Test
+        run: uv run pytest -v

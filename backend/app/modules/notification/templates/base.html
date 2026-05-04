@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ subject | default("NexHire") }}</title>
+    {# Inline CSS — most email clients strip <style>, so each rule
+       repeats inline below. Keep this minimal. #}
+    <style>
+      body { margin: 0; padding: 0; background: #f8fafc; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; color: #0f172a; }
+    </style>
+  </head>
+  <body style="margin:0;padding:0;background:#f8fafc;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;color:#0f172a;">
+    <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0">
+      <tr>
+        <td align="center" style="padding: 24px 12px;">
+          <table role="presentation" width="100%" style="max-width:640px;background:#ffffff;border-radius:12px;border:1px solid #e2e8f0;" cellspacing="0" cellpadding="0" border="0">
+            <tr>
+              <td style="padding:24px 32px;border-bottom:1px solid #e2e8f0;">
+                <table role="presentation" cellspacing="0" cellpadding="0" border="0">
+                  <tr>
+                    <td style="background:#2563eb;width:24px;height:24px;border-radius:6px;"></td>
+                    <td style="padding-left:8px;font-weight:600;font-size:18px;color:#0f172a;">NexHire</td>
+                  </tr>
+                </table>
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:32px;">
+                {% block content %}{% endblock %}
+              </td>
+            </tr>
+            <tr>
+              <td style="padding:16px 32px 24px;border-top:1px solid #e2e8f0;font-size:12px;color:#64748b;">
+                You're receiving this because you're part of the NexHire internship program.
+                {% block footer %}{% endblock %}
+              </td>
+            </tr>
+          </table>
+          <p style="font-size:11px;color:#94a3b8;margin-top:16px;">
+            NexHire — AI-powered intern referral management.
+          </p>
+        </td>
+      </tr>
+    </table>
+  </body>
+</html>

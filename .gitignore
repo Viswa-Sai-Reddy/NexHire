@@ -1,0 +1,60 @@
+# ── Python ─────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.python-version.local
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+*.egg-info/
+dist/
+build/
+
+# uv
+.uv/
+
+# ── Node ──────────────────────────────────────────────
+node_modules/
+.pnpm-store/
+*.tsbuildinfo
+.vite/
+
+# ── Frontend build output ──────────────────────────────
+frontend/dist/
+backend/static/
+
+# ── Env / secrets ──────────────────────────────────────
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# ── IDE ────────────────────────────────────────────────
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+*.swp
+*.swo
+
+# ── OS ─────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+
+# ── Logs ───────────────────────────────────────────────
+*.log
+logs/
+
+# ── Local dev ──────────────────────────────────────────
+*.local
+.scratch/
+DEV/

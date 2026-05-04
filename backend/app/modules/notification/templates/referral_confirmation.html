@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block content %}
+  <h1 style="margin:0 0 16px;font-size:24px;font-weight:600;line-height:1.2;color:#0f172a;">
+    Your referral has been submitted
+  </h1>
+  <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#0f172a;">
+    Hi {{ referrer_name }},
+  </p>
+  <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">
+    Thanks for referring <strong>{{ candidate_name }}</strong>. We've sent
+    a mentoring request to <strong>{{ mentor_name }}</strong> and will let
+    you know as soon as we hear back. Mentors have 3 calendar days to
+    respond.
+  </p>
+  <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:16px 0 24px;width:100%;border:1px solid #e2e8f0;border-radius:8px;">
+    <tr>
+      <td style="padding:14px 16px;font-size:14px;color:#0f172a;">
+        <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+          <tr>
+            <td style="padding:4px 0;color:#64748b;">Candidate</td>
+            <td style="padding:4px 0;text-align:right;">{{ candidate_name }}</td>
+          </tr>
+          <tr>
+            <td style="padding:4px 0;color:#64748b;">College</td>
+            <td style="padding:4px 0;text-align:right;">{{ college_name }}</td>
+          </tr>
+          <tr>
+            <td style="padding:4px 0;color:#64748b;">Project</td>
+            <td style="padding:4px 0;text-align:right;">{{ project_title }}</td>
+          </tr>
+          <tr>
+            <td style="padding:4px 0;color:#64748b;">Mentor</td>
+            <td style="padding:4px 0;text-align:right;">{{ mentor_name }}</td>
+          </tr>
+          <tr>
+            <td style="padding:4px 0;color:#64748b;">Status</td>
+            <td style="padding:4px 0;text-align:right;">Awaiting mentor response</td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+  <a href="{{ portal_url }}/referrals/{{ referral_id }}"
+     style="display:inline-block;background:#2563eb;color:#ffffff;text-decoration:none;padding:10px 20px;border-radius:8px;font-size:14px;font-weight:500;">
+    View referral
+  </a>
+  <p style="margin:24px 0 0;font-size:13px;color:#64748b;">
+    You can track every step of this referral on the NexHire dashboard.
+  </p>
+{% endblock %}
