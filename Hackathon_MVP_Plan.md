@@ -4151,3 +4151,530 @@ CANDIDATE COOLING STATUS TABLE (filterable, exportable)
 
 *NexHire System Blueprint v2.3 — Variable Cooling Period System Added*
 *AI Coverage: 85% · HR Work: 15% · 6 cooling period rules · Program Owner override*
+
+---
+
+## 20. Program Owner Configuration Management
+
+> **Design Note:** This section supersedes the cooling period configurability
+> decision in Section 19.2. Cooling period durations and mentor threshold
+> are now UI-editable by Program Owner. The DB-seeded values remain as
+> defaults — the app role now has controlled UPDATE access via the
+> configuration service only (not direct DB access).
+>
+> **Scope of change:** All config changes apply to NEW referrals and
+> NEW terminal state events only. Active referrals, active cooling periods,
+> and active mentor assignments are NEVER retroactively affected.
+
+### 20.1 What Program Owner Can Configure
+
+| Setting | Default | UI Editable | Scope |
+|---|---|---|---|
+| Mentor max mentee threshold | 4 | ✅ Yes | New assignments only |
+| Cooling period — NDA_DECLINED_REJECTED | 6 months | ✅ Yes | New terminal states only |
+| Cooling period — TERMINATED | 6 months | ✅ Yes | New terminal states only |
+| Cooling period — NDA_TIMEOUT_REJECTED | 3 months | ✅ Yes | New terminal states only |
+| Cooling period — HR_REJECTED | 3 months | ✅ Yes | New terminal states only |
+| Cooling period — CANDIDATE_REJECTED | 0 months | ✅ Yes | New terminal states only |
+| Cooling period — CLOSED | 3 months | ✅ Yes | New terminal states only |
+
+**What remains hardcoded (not UI-editable):**
+- Maximum referrals per referrer per college (2) — BRD requirement
+- Year of study restriction (2nd–4th only) — BRD requirement
+- NDA signing deadline (5 days) — legal/compliance requirement
+- SLA durations — operations policy, requires code review
+
+### 20.2 Database Schema — Configuration Tables
+
+```sql
+-- ─────────────────────────────────────────────────────────────────
+-- MENTOR THRESHOLD CONFIG
+-- ─────────────────────────────────────────────────────────────────
+CREATE TABLE mentor_threshold_config (
+    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    max_mentees      SMALLINT NOT NULL DEFAULT 4
+                     CHECK (max_mentees BETWEEN 1 AND 10),
+    effective_from   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    set_by           UUID NOT NULL REFERENCES users(id),
+    reason           TEXT,
+    is_current       BOOLEAN DEFAULT true,
+    created_at       TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Only one current record at a time
+CREATE UNIQUE INDEX idx_mentor_threshold_current
+    ON mentor_threshold_config(is_current)
+    WHERE is_current = true;
+
+-- Seed default
+INSERT INTO mentor_threshold_config
+    (max_mentees, set_by, reason, is_current)
+VALUES (4, system_user_id,
+        'Initial default — max 4 mentees per mentor', true);
+
+-- ─────────────────────────────────────────────────────────────────
+-- COOLING PERIOD CONFIG (upgraded from Section 19.2)
+-- Now UPDATE-able via configuration service (not direct DB)
+-- ─────────────────────────────────────────────────────────────────
+-- Add versioning columns to existing cooling_period_config
+ALTER TABLE cooling_period_config
+    ADD COLUMN effective_from  TIMESTAMPTZ DEFAULT NOW(),
+    ADD COLUMN set_by          UUID REFERENCES users(id),
+    ADD COLUMN reason          TEXT,
+    ADD COLUMN previous_value  SMALLINT;   -- duration before this change
+
+-- ─────────────────────────────────────────────────────────────────
+-- CONFIG CHANGE HISTORY (unified audit table for all config changes)
+-- ─────────────────────────────────────────────────────────────────
+CREATE TABLE config_change_history (
+    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    config_type      VARCHAR(50) NOT NULL,
+                     -- MENTOR_THRESHOLD | COOLING_PERIOD
+    config_key       VARCHAR(100) NOT NULL,
+                     -- 'max_mentees' | 'NDA_DECLINED_REJECTED' | etc.
+    previous_value   VARCHAR(50) NOT NULL,   -- value before change
+    new_value        VARCHAR(50) NOT NULL,   -- value after change
+    unit             VARCHAR(20),            -- 'mentees' | 'months'
+    reason           TEXT,                   -- optional note from PO
+    changed_by       UUID NOT NULL REFERENCES users(id),
+    changed_at       TIMESTAMPTZ DEFAULT NOW(),
+    effective_from   TIMESTAMPTZ NOT NULL,   -- when it starts applying
+    applies_to       VARCHAR(50) DEFAULT 'NEW_REFERRALS_ONLY',
+    -- Active referrals snapshot at time of change (for reference)
+    active_referrals_count   INTEGER,
+    active_mentors_affected  INTEGER
+);
+
+-- App role: INSERT only (no UPDATE/DELETE — immutable history)
+REVOKE UPDATE, DELETE ON config_change_history FROM nexhire_app;
+```
+
+### 20.3 Configuration Service
+
+```python
+# app/modules/admin/config_service.py
+
+from app.shared.exceptions import (
+    InsufficientPermissionsError,
+    ValidationError,
+    BusinessRuleError
+)
+
+class ProgramConfigService:
+    """
+    Manages all Program Owner-configurable settings.
+    Enforces: role check, validation, impact preview,
+              immutable history, audit event.
+    Changes apply to NEW referrals only — active ones never affected.
+    """
+
+    # ── Mentor Threshold ──────────────────────────────────────────
+
+    async def get_mentor_threshold(self) -> int:
+        """Always reads current threshold from DB — never cached."""
+        record = await db.query("""
+            SELECT max_mentees FROM mentor_threshold_config
+            WHERE is_current = true
+        """)
+        return record.max_mentees
+
+    async def update_mentor_threshold(self,
+                                       new_value: int,
+                                       changed_by: UUID,
+                                       reason: str | None = None) -> None:
+
+        # GUARD 1: Role check
+        actor = await user_repo.get(changed_by)
+        if actor.role != UserRole.PROGRAM_OWNER:
+            raise InsufficientPermissionsError(
+                user_message="Only Program Owners can change the mentor threshold."
+            )
+
+        # GUARD 2: Value validation
+        if not (1 <= new_value <= 10):
+            raise ValidationError(
+                code="INVALID_MENTOR_THRESHOLD",
+                user_message="Mentor threshold must be between 1 and 10."
+            )
+
+        # GUARD 3: Same value check
+        current = await self.get_mentor_threshold()
+        if new_value == current:
+            raise BusinessRuleError(
+                code="CONFIG_VALUE_UNCHANGED",
+                user_message=f"Mentor threshold is already set to {current}."
+            )
+
+        # IMPACT PREVIEW (computed before applying change)
+        impact = await self._compute_mentor_threshold_impact(new_value, current)
+
+        async with db.transaction():
+            # Deactivate current record
+            await db.execute("""
+                UPDATE mentor_threshold_config
+                SET is_current = false
+                WHERE is_current = true
+            """)
+
+            # Insert new record
+            await db.execute("""
+                INSERT INTO mentor_threshold_config
+                    (max_mentees, set_by, reason, is_current, effective_from)
+                VALUES (:val, :by, :reason, true, NOW())
+            """, val=new_value, by=changed_by, reason=reason)
+
+            # Immutable history record
+            await db.execute("""
+                INSERT INTO config_change_history
+                    (config_type, config_key, previous_value, new_value,
+                     unit, reason, changed_by, effective_from,
+                     applies_to, active_referrals_count,
+                     active_mentors_affected)
+                VALUES
+                    ('MENTOR_THRESHOLD', 'max_mentees',
+                     :prev, :new, 'mentees', :reason,
+                     :by, NOW(), 'NEW_REFERRALS_ONLY',
+                     :active_refs, :affected_mentors)
+            """, prev=str(current), new=str(new_value),
+                 reason=reason, by=changed_by,
+                 active_refs=impact.active_referrals_count,
+                 affected_mentors=impact.affected_mentors_count)
+
+        # Immutable audit event
+        await audit_publisher.publish(AuditEvent(
+            event_type="MENTOR_THRESHOLD_CHANGED",
+            actor_user_id=changed_by,
+            actor_role="PROGRAM_OWNER",
+            payload={
+                "previous_value":          current,
+                "new_value":               new_value,
+                "reason":                  reason,
+                "applies_to":              "NEW_REFERRALS_ONLY",
+                "active_referrals_count":  impact.active_referrals_count,
+                "affected_mentors_count":  impact.affected_mentors_count,
+                "changed_at":              utcnow().isoformat()
+            }
+        ))
+
+    # ── Cooling Period ────────────────────────────────────────────
+
+    async def get_cooling_period(self, terminal_state: str) -> int:
+        record = await db.query("""
+            SELECT duration_months FROM cooling_period_config
+            WHERE terminal_state = :state AND is_active = true
+        """, state=terminal_state)
+        return record.duration_months
+
+    async def update_cooling_period(self,
+                                     terminal_state: str,
+                                     new_duration_months: int,
+                                     changed_by: UUID,
+                                     reason: str | None = None) -> None:
+
+        # GUARD 1: Role check
+        actor = await user_repo.get(changed_by)
+        if actor.role != UserRole.PROGRAM_OWNER:
+            raise InsufficientPermissionsError(
+                user_message="Only Program Owners can change cooling periods."
+            )
+
+        # GUARD 2: Valid terminal state
+        valid_states = [
+            "NDA_DECLINED_REJECTED", "TERMINATED",
+            "NDA_TIMEOUT_REJECTED", "HR_REJECTED",
+            "CANDIDATE_REJECTED", "CLOSED"
+        ]
+        if terminal_state not in valid_states:
+            raise ValidationError(
+                code="INVALID_TERMINAL_STATE",
+                user_message=f"Unknown terminal state: {terminal_state}"
+            )
+
+        # GUARD 3: Duration range
+        if not (0 <= new_duration_months <= 24):
+            raise ValidationError(
+                code="INVALID_COOLING_DURATION",
+                user_message="Cooling period must be between 0 and 24 months."
+            )
+
+        # GUARD 4: CANDIDATE_REJECTED must stay 0 (policy — not candidate's fault)
+        if terminal_state == "CANDIDATE_REJECTED" and new_duration_months > 0:
+            raise BusinessRuleError(
+                code="CANNOT_PENALIZE_CANDIDATE_REJECTED",
+                user_message="Cooling period for 'Mentor Unavailability' "
+                             "must remain 0. Candidates are not at fault "
+                             "when mentors are unavailable."
+            )
+
+        current = await self.get_cooling_period(terminal_state)
+
+        if new_duration_months == current:
+            raise BusinessRuleError(
+                code="CONFIG_VALUE_UNCHANGED",
+                user_message=f"Cooling period for {terminal_state} "
+                             f"is already {current} months."
+            )
+
+        # Impact preview
+        impact = await self._compute_cooling_impact(terminal_state)
+
+        async with db.transaction():
+            # Update cooling_period_config
+            await db.execute("""
+                UPDATE cooling_period_config
+                SET duration_months = :new,
+                    effective_from  = NOW(),
+                    set_by          = :by,
+                    reason          = :reason,
+                    previous_value  = :prev,
+                    updated_at      = NOW()
+                WHERE terminal_state = :state
+            """, new=new_duration_months, by=changed_by,
+                 reason=reason, prev=current, state=terminal_state)
+
+            # Immutable history record
+            await db.execute("""
+                INSERT INTO config_change_history
+                    (config_type, config_key, previous_value, new_value,
+                     unit, reason, changed_by, effective_from,
+                     applies_to, active_referrals_count)
+                VALUES
+                    ('COOLING_PERIOD', :state,
+                     :prev, :new, 'months', :reason,
+                     :by, NOW(), 'NEW_TERMINAL_STATES_ONLY',
+                     :active_refs)
+            """, state=terminal_state,
+                 prev=str(current), new=str(new_duration_months),
+                 reason=reason, by=changed_by,
+                 active_refs=impact.candidates_currently_cooling)
+
+        # Immutable audit event
+        await audit_publisher.publish(AuditEvent(
+            event_type="COOLING_PERIOD_CONFIG_CHANGED",
+            actor_user_id=changed_by,
+            actor_role="PROGRAM_OWNER",
+            payload={
+                "terminal_state":              terminal_state,
+                "previous_duration_months":    current,
+                "new_duration_months":         new_duration_months,
+                "reason":                      reason,
+                "applies_to":                  "NEW_TERMINAL_STATES_ONLY",
+                "candidates_currently_cooling": impact.candidates_currently_cooling,
+                "changed_at":                  utcnow().isoformat()
+            }
+        ))
+
+    async def _compute_mentor_threshold_impact(self,
+                                                new_value: int,
+                                                current: int) -> ImpactReport:
+        """
+        Computes impact preview shown to Program Owner before confirming.
+        Active assignments are NEVER affected — this is informational only.
+        """
+        active_refs = await db.query(
+            "SELECT COUNT(*) FROM referrals WHERE status NOT IN (:terminal_states)",
+            terminal_states=TERMINAL_STATES
+        )
+        if new_value < current:
+            # Threshold reduced — how many mentors are currently above new limit?
+            affected = await db.query("""
+                SELECT COUNT(DISTINCT mentor_id)
+                FROM interns
+                WHERE status = 'ACTIVE'
+                GROUP BY mentor_id
+                HAVING COUNT(*) >= :new_val
+            """, new_val=new_value)
+        else:
+            affected_count = 0
+
+        return ImpactReport(
+            active_referrals_count=active_refs.count,
+            affected_mentors_count=affected.count if new_value < current else 0,
+            note="Active mentoring assignments are NOT affected by this change."
+        )
+
+    async def _compute_cooling_impact(self,
+                                       terminal_state: str) -> ImpactReport:
+        candidates = await db.query("""
+            SELECT COUNT(*) FROM referrals
+            WHERE cooling_triggered_by = :state
+            AND cooling_period_end_at > NOW()
+            AND cooling_override_at IS NULL
+        """, state=terminal_state)
+        return ImpactReport(
+            candidates_currently_cooling=candidates.count,
+            note="Candidates currently in cooling period are NOT affected."
+        )
+```
+
+### 20.4 UI — Configuration Panel (S25 Upgrade)
+
+```
+S25: Configuration Panel — Program Owner Only
+─────────────────────────────────────────────────────────────────────
+
+TAB 1: MENTOR SETTINGS
+┌──────────────────────────────────────────────────────────────────────┐
+│  Mentor Capacity Threshold                                           │
+│  ─────────────────────────────────────────────────────────────────  │
+│  Current setting:  4 mentees per mentor                             │
+│  Last changed:     Never (default)                                  │
+│                                                                      │
+│  New value: [  4  ] mentees  (range: 1–10)                         │
+│                                                                      │
+│  ⚠️  Impact Preview:                                               │
+│    Active referrals:      23 (unaffected)                           │
+│    Mentors above new limit: 0                                        │
+│    Note: Only new mentor assignments will use the updated threshold. │
+│    Existing assignments are never retroactively affected.            │
+│                                                                      │
+│  Reason (optional): [                                    ]          │
+│                                                                      │
+│  [Save Change]                                                       │
+│                                                                      │
+│  CHANGE HISTORY                                                      │
+│  ─────────────────────────────────────────────────────────────────  │
+│  No changes yet — using system default (4)                          │
+└──────────────────────────────────────────────────────────────────────┘
+
+TAB 2: COOLING PERIOD SETTINGS
+┌──────────────────────────────────────────────────────────────────────┐
+│  Cooling Period Configuration                                        │
+│  ─────────────────────────────────────────────────────────────────  │
+│  ⚠️  Changes apply to NEW terminal state events only.              │
+│     Candidates currently in a cooling period are NOT affected.      │
+│                                                                      │
+│  Terminal State              Current    New Value   In Cooling Now  │
+│  ─────────────────────────────────────────────────────────────────  │
+│  NDA Declined                6 months   [6▼]        4 candidates   │
+│  Left Mid-Internship         6 months   [6▼]        2 candidates   │
+│  NDA Timeout                 3 months   [3▼]        8 candidates   │
+│  HR Rejected                 3 months   [3▼]        3 candidates   │
+│  Mentor Unavailability       0 months   [0▼] 🔒     0 candidates   │
+│    └─ Cannot be changed (not candidate's fault — policy)           │
+│  Completed (Re-join)         3 months   [3▼]        5 candidates   │
+│                                                                      │
+│  Reason for changes (optional): [                              ]    │
+│                                                                      │
+│  [Save All Changes]                                                  │
+│                                                                      │
+│  CHANGE HISTORY                                                      │
+│  ─────────────────────────────────────────────────────────────────  │
+│  23 Mar 2025  Program Owner    NDA Declined: 6→9 months  [Reverted] │
+│  15 Feb 2025  Program Owner    HR Rejected: 6→3 months             │
+└──────────────────────────────────────────────────────────────────────┘
+
+TAB 3: CONFIG CHANGE HISTORY (full log)
+┌──────────────────────────────────────────────────────────────────────┐
+│  All Configuration Changes                   [Export CSV]           │
+│  ─────────────────────────────────────────────────────────────────  │
+│  Date         Changed By       Setting              From    To      │
+│  23 Mar 2025  Rajesh (PO)      NDA Declined CP      6mo     9mo     │
+│  15 Feb 2025  Rajesh (PO)      HR Rejected CP       6mo     3mo     │
+│  01 Jan 2025  System           Mentor Threshold     —       4       │
+│  ...                                                                 │
+│                                                                      │
+│  [Filter by: Config Type ▼] [Date Range] [Changed By]              │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+### 20.5 "Active Referrals Unaffected" — Enforcement Logic
+
+```python
+# How "new referrals only" is enforced technically:
+
+# MENTOR THRESHOLD:
+# The threshold is read at the moment of mentor selection validation.
+# Active assignments already created are never re-evaluated.
+
+async def validate_mentor_capacity(mentor_id: UUID) -> bool:
+    # Always reads CURRENT threshold from DB (live lookup)
+    threshold = await config_service.get_mentor_threshold()
+    active_count = await db.query("""
+        SELECT COUNT(*) FROM interns
+        WHERE mentor_id = :id AND status = 'ACTIVE'
+    """, id=mentor_id)
+    return active_count.count < threshold   # uses current threshold
+
+# COOLING PERIOD:
+# Duration is read from config ONLY when apply_cooling_period() is called.
+# Existing cooling_period_end_at values are NEVER recalculated.
+
+async def apply_cooling_period(referral_id: UUID, terminal_state: str):
+    # Reads CURRENT duration from DB at the moment of application
+    config = await db.query("""
+        SELECT duration_months FROM cooling_period_config
+        WHERE terminal_state = :state
+    """, state=terminal_state)
+    # This uses whatever duration is current RIGHT NOW
+    # Previous records are untouched
+    duration = config.duration_months
+    end_date  = utcnow() + relativedelta(months=duration)
+    # Store on THIS referral only
+    await referral_repo.update(referral_id, {
+        "cooling_period_months":   duration,
+        "cooling_period_end_at":   end_date
+    })
+```
+
+### 20.6 Updated Role Permission Matrix — Program Owner Config Permissions
+
+| Permission | Program Owner |
+|---|---|
+| View config panel (S25) | ✅ |
+| Change mentor threshold | ✅ |
+| Change cooling period durations | ✅ |
+| Change CANDIDATE_REJECTED cooling | ❌ (policy-locked) |
+| View full config change history | ✅ |
+| Export config change history | ✅ |
+| Override individual cooling period | ✅ (existing — F-41) |
+
+### 20.7 Audit Events — Config Changes
+
+```
+CONFIG_CHANGED events are written to audit_events table (immutable):
+
+MENTOR_THRESHOLD_CHANGED:
+  {
+    event_type:   "MENTOR_THRESHOLD_CHANGED",
+    actor_role:   "PROGRAM_OWNER",
+    payload: {
+      previous_value:         4,
+      new_value:              5,
+      reason:                 "Program expansion Q3 2025",
+      applies_to:             "NEW_REFERRALS_ONLY",
+      active_referrals_count: 23,
+      changed_at:             "2025-08-01T10:23:00Z"
+    }
+  }
+
+COOLING_PERIOD_CONFIG_CHANGED:
+  {
+    event_type:   "COOLING_PERIOD_CONFIG_CHANGED",
+    actor_role:   "PROGRAM_OWNER",
+    payload: {
+      terminal_state:               "NDA_DECLINED_REJECTED",
+      previous_duration_months:     6,
+      new_duration_months:          9,
+      reason:                       "Industry benchmark alignment",
+      applies_to:                   "NEW_TERMINAL_STATES_ONLY",
+      candidates_currently_cooling: 4,
+      changed_at:                   "2025-08-01T10:25:00Z"
+    }
+  }
+```
+
+### 20.8 Error Codes — Config Management
+
+| Code | Trigger | Message |
+|---|---|---|
+| `INVALID_MENTOR_THRESHOLD` | Value outside 1–10 | "Mentor threshold must be between 1 and 10." |
+| `INVALID_COOLING_DURATION` | Duration outside 0–24 months | "Cooling period must be between 0 and 24 months." |
+| `CANNOT_PENALIZE_CANDIDATE_REJECTED` | Trying to set CP > 0 for CANDIDATE_REJECTED | "This cooling period must remain 0 — candidates are not at fault." |
+| `CONFIG_VALUE_UNCHANGED` | New value = current value | "This setting is already set to [value]." |
+| `CONFIG_INSUFFICIENT_PERMISSIONS` | Non-PO attempts config change | "Only Program Owners can change system configuration." |
+
+---
+
+*NexHire System Blueprint v2.4 — Program Owner Config Management Added*
+*Roles: 7 human + 1 system · Config: Mentor threshold + Cooling periods · UI-editable by Program Owner*
