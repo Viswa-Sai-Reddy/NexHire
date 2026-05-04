@@ -2929,3 +2929,252 @@ Config:   DB-seeded · Hardcoded · Requires migration to change
 *NexHire System Flow Document v2.3*
 *42 flows · Variable cooling period system · 6 rules · Program Owner override*
 *Companion: NexHire System Blueprint v2.3*
+
+---
+
+## F-43: Mentor Threshold Configuration Change Flow
+
+```
+TRIGGER: Program Owner changes mentor threshold via S25 Config Panel
+
+SEQUENCE:
+  ─────────────────────────────────────────────────────────────────────────────
+
+  1. Program Owner opens S25 → TAB 1: Mentor Settings
+     Sees: current value (e.g., 4), last changed date
+
+  2. Program Owner enters new value (e.g., 5)
+     Frontend: real-time range validation (1–10)
+     ↓
+     API call: GET /admin/config/mentor-threshold/impact?new_value=5
+     System computes impact preview:
+       Active referrals:       23 (unaffected)
+       Mentors above new limit: 0
+       Note: "Only new mentor assignments will use updated threshold"
+
+  3. Impact preview shown in UI before save:
+     ┌──────────────────────────────────────────────────────────┐
+     │  ⚠️  Impact of changing threshold from 4 → 5           │
+     │  Active referrals:       23  (NOT affected)             │
+     │  Mentors above limit:    0   (NOT affected)             │
+     │  Effective for:          New mentor assignments only     │
+     └──────────────────────────────────────────────────────────┘
+
+  4. Program Owner clicks [Save Change]
+     ↓
+     BACKEND GUARDS:
+       Role check: actor.role = PROGRAM_OWNER? else 403
+       Value range: 1 ≤ new_value ≤ 10? else 400
+       Same value: new ≠ current? else 422
+
+  5. DB transaction:
+       Previous record: is_current → false
+       New record inserted: max_mentees=5, is_current=true
+       config_change_history record inserted (immutable)
+
+  6. Audit event: MENTOR_THRESHOLD_CHANGED (immutable)
+
+  7. UI updates:
+       "Current setting: 5 mentees per mentor"
+       "Last changed: [today] by [Program Owner name]"
+       Change appears in history table immediately
+
+  "ACTIVE REFERRALS UNAFFECTED" ENFORCEMENT:
+    All active mentor assignments read their threshold at
+    validation time (live DB lookup).
+    Mentors currently at 4/4:
+      → Still shown as FULL (4 ≥ 4 = still full)
+    Mentors currently at 4/5 (after change):
+      → Next assignment check: 4 < 5 = available again
+    No retroactive re-evaluation ever runs.
+
+  ERROR PATHS:
+    Value = 0     → 400: "Must be at least 1"
+    Value = 11    → 400: "Cannot exceed 10"
+    Value = 4 (unchanged) → 422: "Already set to 4"
+    Non-PO user   → 403: "Only Program Owners can change this"
+```
+
+---
+
+## F-44: Cooling Period Configuration Change Flow
+
+```
+TRIGGER: Program Owner changes one or more cooling periods via S25 Config Panel
+
+SEQUENCE:
+  ─────────────────────────────────────────────────────────────────────────────
+
+  1. Program Owner opens S25 → TAB 2: Cooling Period Settings
+     Sees table:
+       All 6 terminal states
+       Current duration per state
+       Dropdown to change each
+       "In Cooling Now" count per state (live)
+
+  2. Program Owner adjusts dropdown(s):
+     e.g., NDA_DECLINED_REJECTED: 6 → 9 months
+           HR_REJECTED:           3 → 6 months
+
+     Frontend shows inline impact per row:
+       "9 candidates currently in NDA_DECLINED cooling — NOT affected"
+
+  3. Program Owner attempts to change CANDIDATE_REJECTED:
+     Dropdown disabled — locked at 0
+     Tooltip: "Cannot be changed. Candidates are not at fault
+               when mentors are unavailable."
+
+  4. Program Owner clicks [Save All Changes]
+     ↓
+     API: POST /admin/config/cooling-periods
+       { changes: [
+           { terminal_state: "NDA_DECLINED_REJECTED", new_value: 9 },
+           { terminal_state: "HR_REJECTED", new_value: 6 }
+       ]}
+
+  5. BACKEND GUARDS per change:
+       Role check: PROGRAM_OWNER only
+       Valid terminal state (known state)
+       Duration 0–24 months
+       CANDIDATE_REJECTED must stay 0 (hard guard)
+       Value unchanged → skip (not an error for batch save)
+
+  6. DB transaction (atomic — all changes or none):
+       FOR EACH valid change:
+         UPDATE cooling_period_config
+           SET duration_months = new_value,
+               effective_from = NOW(),
+               set_by = actor_id,
+               previous_value = current_value
+         INSERT INTO config_change_history (one row per change)
+
+  7. Audit events: one COOLING_PERIOD_CONFIG_CHANGED per state changed
+
+  8. UI confirms:
+       "2 cooling period settings updated successfully."
+       History table shows both changes immediately
+
+  "NEW TERMINAL STATES ONLY" ENFORCEMENT:
+    apply_cooling_period() reads duration_months from DB at call time.
+    Referrals currently in cooling:
+      → Their cooling_period_end_at was set when THEY reached terminal state
+      → Never recalculated
+      → Unaffected by config change
+    Future terminal state events:
+      → Will read new duration at that moment
+      → New end date calculated with new duration
+
+  EXAMPLE:
+    Today: NDA_DECLINED cooling = 6 months
+    Riya reached NDA_DECLINED on 1 Jan → cooling ends 1 Jul (6 months)
+    Program Owner changes to 9 months on 15 Mar
+    Riya's cooling_period_end_at: still 1 Jul (UNCHANGED)
+    Priya reaches NDA_DECLINED on 20 Mar → cooling ends 20 Dec (9 months ✅)
+
+  ERROR PATHS:
+    Duration > 24  → 400: "Cannot exceed 24 months"
+    Duration < 0   → 400: "Cannot be negative"
+    CANDIDATE_REJECTED > 0 → 422: policy-locked error
+    Non-PO user    → 403: insufficient permissions
+```
+
+---
+
+## F-45: Config Change History View Flow
+
+```
+TRIGGER: Program Owner opens TAB 3 of S25 Config Panel
+
+SEQUENCE:
+  ─────────────────────────────────────────────────────────────────────────────
+
+  1. Program Owner opens history tab
+     System loads config_change_history (paginated, newest first)
+
+  2. FILTERS available:
+       Config Type:  [All ▼] / Mentor Threshold / Cooling Period
+       Date Range:   [From] [To]
+       Changed By:   [All Program Owners ▼]
+
+  3. TABLE DISPLAY per row:
+       Date & Time
+       Changed By (Program Owner name)
+       Setting changed (e.g., "NDA Declined Cooling Period")
+       Previous value → New value (e.g., "6 months → 9 months")
+       Reason (if provided)
+       Candidates/referrals snapshot at time of change
+       Applies To: "New terminal states only" / "New assignments only"
+
+  4. EXPORT:
+       [Export CSV] → downloads full history with all columns
+       Used for: compliance reporting, program audits, policy reviews
+
+  5. NO ROLLBACK from UI:
+       History is read-only
+       To revert a change: Program Owner makes a new change
+         (e.g., sets NDA_DECLINED back to 6 months)
+       Both changes appear in history — full trail preserved
+       Reason: every change is a deliberate policy decision,
+                not an accidental click
+
+  AUDIT TRAIL NOTE:
+    config_change_history is INSERT-only (no UPDATE/DELETE for app role)
+    Changes to config that affect active referrals are visible
+    in both config_change_history AND audit_events (dual logging)
+    This provides both operational history AND compliance audit trail
+```
+
+---
+
+## Updated Role Summary — Final
+
+```
+NEXHIRE ROLES — COMPLETE & FINAL
+─────────────────────────────────────────────────────────────────────────────
+
+ROLE              LOGIN          KEY PERMISSIONS
+─────────────────────────────────────────────────────────────────────────────
+Referrer          Azure AD SSO   Submit referrals · max 2/college
+                                 Select mentor · track own referrals
+
+Mentor            Azure AD SSO   Accept/reject assignments · max 4 mentees
+                                 Confirm start/end · request extension
+
+Candidate         Magic link     Fill joining form · sign NDA
+                                 Own record only · no login post-closure
+
+HR                Azure AD SSO   Review flagged referrals (20%)
+                                 Review flagged forms (25%)
+                                 Non-Worker ID · NDA · letters · certs
+                                 Recall AI auto-actions
+
+IT / AD           Azure AD SSO   Task queue only · AD provisioning
+                                 Minimal PII access
+
+Admin / Security  Azure AD SSO   Task queue only · badge access
+                                 Name + photo + dates only
+
+Program Owner     Azure AD SSO   Executive dashboard · full audit trail
+                                 All escalations · cooling period overrides
+                                 ✅ Change mentor threshold (UI)
+                                 ✅ Change cooling period durations (UI)
+                                 AI chatbot · config change history
+
+System            Automated      AI engine · scheduler · notifications
+                                 Webhook processor · auto-router
+
+─────────────────────────────────────────────────────────────────────────────
+CONFIG PERMISSIONS (Program Owner exclusive):
+  Mentor threshold:        1–10 mentees · immediate for new assignments
+  Cooling periods:         0–24 months per state · immediate for new events
+  CANDIDATE_REJECTED CP:   Locked at 0 · cannot be changed (policy)
+  Config change history:   Read-only · exportable · immutable
+─────────────────────────────────────────────────────────────────────────────
+```
+
+---
+
+*NexHire System Flow Document v2.4*
+*45 flows · 8 roles (7 human + 1 system) · Program Owner config management*
+*Mentor threshold + Cooling periods: UI-configurable · Active referrals: never affected*
+*Companion: NexHire System Blueprint v2.4*
