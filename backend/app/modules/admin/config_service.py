@@ -13,7 +13,7 @@ active records are never retroactively affected.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import cast
 from uuid import UUID
 
@@ -40,7 +40,7 @@ logger = logging.getLogger("nexhire.admin.config_service")
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 # ────────────────────────────────────────────────────────────────────

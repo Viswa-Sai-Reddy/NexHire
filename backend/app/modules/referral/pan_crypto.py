@@ -54,7 +54,7 @@ class PanCiphertext(NamedTuple):
     blob: bytes
 
     @classmethod
-    def from_parts(cls, nonce: bytes, ciphertext: bytes) -> "PanCiphertext":
+    def from_parts(cls, nonce: bytes, ciphertext: bytes) -> PanCiphertext:
         if len(nonce) != _NONCE_LEN:
             raise ValueError("nonce must be 12 bytes")
         return cls(nonce + ciphertext)
@@ -87,13 +87,45 @@ def _pepper() -> bytes:
 
 @lru_cache(maxsize=1)
 def _aes_key() -> bytes:
+    """Resolve the AES-256 key from the env var.
+
+    Accepts three formats, in order of preference:
+      * Hex (64 chars, 0-9a-f).
+      * Base64 (44 chars including `=` padding).
+      * Raw 32-byte string.
+    """
+    import base64
+
     cfg = get_settings()
     raw = cfg.pan_aes_key
     if not raw:
         raise RuntimeError("PAN_AES_KEY is not configured")
-    key = bytes.fromhex(raw) if all(c in "0123456789abcdefABCDEF" for c in raw) else raw.encode()
+
+    key: bytes | None = None
+
+    # Hex (64 chars).
+    if len(raw) == 64 and all(c in "0123456789abcdefABCDEF" for c in raw):
+        try:
+            key = bytes.fromhex(raw)
+        except ValueError:
+            key = None
+
+    # Base64 (44 chars with padding).
+    if key is None and len(raw) in (43, 44):
+        try:
+            key = base64.b64decode(raw, validate=True)
+        except (ValueError, base64.binascii.Error):
+            key = None
+
+    # Fallback: assume raw bytes already.
+    if key is None:
+        key = raw.encode()
+
     if len(key) != 32:
-        raise RuntimeError("PAN_AES_KEY must be exactly 32 bytes (AES-256)")
+        raise RuntimeError(
+            f"PAN_AES_KEY must decode to exactly 32 bytes (AES-256); "
+            f"got {len(key)} bytes from a {len(raw)}-char value."
+        )
     return key
 
 

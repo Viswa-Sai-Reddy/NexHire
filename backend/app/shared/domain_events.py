@@ -18,7 +18,7 @@ in this file (mentor lifecycle, NDA, extension, closure, etc.).
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from app.shared.value_objects import (
@@ -30,7 +30,7 @@ from app.shared.value_objects import (
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -197,6 +197,21 @@ class ReferralApproved(DomainEvent):
     candidate_name: str
     approved_by_user_id: UserId
     approved_by_label: str  # "HR" | "AI_AUTO_APPROVAL"
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class CandidateMagicLinkIssued(DomainEvent):
+    """A fresh CANDIDATE_ACCESS magic link was minted. Notification
+    handler subscribes and emails the candidate the joining-form link.
+    The raw token is in-memory only — DB stores the hash.
+    """
+
+    referral_id: ReferralId
+    intern_id: InternId
+    candidate_email: str
+    candidate_name: str
+    raw_token: str
+    expires_at: datetime
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)

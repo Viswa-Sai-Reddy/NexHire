@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block content %}
+  <h1 style="margin:0 0 16px;font-size:24px;font-weight:600;line-height:1.2;color:#0f172a;">
+    Your internship is complete — congratulations, {{ candidate_name }}!
+  </h1>
+  <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">
+    Your mentor has confirmed completion of your internship at NexHire.
+    Your participation certificate is ready for download from the
+    candidate portal.
+  </p>
+
+  <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:0 0 24px;width:100%;border:1px solid #e2e8f0;border-radius:8px;">
+    <tr>
+      <td style="padding:14px 16px;font-size:14px;color:#0f172a;">
+        <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+          <tr>
+            <td style="padding:4px 0;color:#64748b;">Project</td>
+            <td style="padding:4px 0;text-align:right;">{{ project_title }}</td>
+          </tr>
+          <tr>
+            <td style="padding:4px 0;color:#64748b;">Non-Worker ID</td>
+            <td style="padding:4px 0;text-align:right;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;">
+              {{ non_worker_id }}
+            </td>
+          </tr>
+          <tr>
+            <td style="padding:4px 0;color:#64748b;">Duration</td>
+            <td style="padding:4px 0;text-align:right;">{{ start_date }} → {{ end_date }}</td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+
+  {% if portal_url %}
+    <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:24px 0;">
+      <tr>
+        <td>
+          <a href="{{ portal_url }}"
+             style="display:inline-block;background:#10b981;color:#ffffff;text-decoration:none;padding:12px 22px;border-radius:8px;font-size:14px;font-weight:500;">
+            Download my certificate
+          </a>
+        </td>
+      </tr>
+    </table>
+  {% endif %}
+
+  <p style="margin:16px 0 0;font-size:13px;color:#64748b;">
+    Sign in with your email and Non-Worker ID at the candidate portal to
+    access the certificate at any time.
+  </p>
+{% endblock %}
+
+{% block footer %}
+  <br />
+  Thanks for being part of NexHire. Reply to this email if you spot any
+  issues with your certificate.
+{% endblock %}

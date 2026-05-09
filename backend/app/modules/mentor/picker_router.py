@@ -26,11 +26,10 @@ from app.modules.referral.schemas import (
     MentorPickerEntry,
     MentorPickerResponse,
     MentorRadar,
+    MentorSuggestion,
     MentorSuggestRequest,
     MentorSuggestResponse,
-    MentorSuggestion,
 )
-
 
 picker_router = APIRouter(prefix="/mentors", tags=["mentors"])
 
@@ -69,7 +68,7 @@ async def eligible(
             MentorPickerEntry(
                 user_id=user.id,
                 full_name=user.full_name,
-                email=user.email,  # type: ignore[arg-type]
+                email=user.email,
                 active_mentees=active,
                 threshold=threshold,
                 available=active < threshold,
@@ -116,7 +115,7 @@ async def suggest(
             MentorSuggestion(
                 user_id=r.user_id,
                 full_name=r.full_name,
-                email=r.email,  # type: ignore[arg-type]
+                email=r.email,
                 active_mentees=r.active_mentees,
                 threshold=r.threshold,
                 match_score=r.match_score,

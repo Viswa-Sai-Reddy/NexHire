@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Any, Optional
+from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
@@ -15,7 +15,8 @@ from sqlalchemy import (
     String,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID as PgUUID
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.infrastructure.database import Base
@@ -38,10 +39,10 @@ class Intern(Base):
         ForeignKey("users.id", ondelete="RESTRICT"),
         nullable=False,
     )
-    non_worker_id: Mapped[Optional[str]] = mapped_column(
+    non_worker_id: Mapped[str | None] = mapped_column(
         String(100), unique=True, nullable=True, default=None
     )
-    ad_account_username: Mapped[Optional[str]] = mapped_column(
+    ad_account_username: Mapped[str | None] = mapped_column(
         String(255), nullable=True, default=None
     )
     ad_account_status: Mapped[str] = mapped_column(
@@ -50,19 +51,19 @@ class Intern(Base):
         default="NOT_CREATED",
         server_default=text("'NOT_CREATED'"),
     )
-    actual_start_date: Mapped[Optional[date]] = mapped_column(
+    actual_start_date: Mapped[date | None] = mapped_column(
         Date, nullable=True, default=None
     )
-    actual_end_date: Mapped[Optional[date]] = mapped_column(
+    actual_end_date: Mapped[date | None] = mapped_column(
         Date, nullable=True, default=None
     )
     extension_count: Mapped[int] = mapped_column(
         SmallInteger, nullable=False, default=0, server_default=text("0")
     )
-    mentor_closure_feedback: Mapped[Optional[dict[str, Any]]] = mapped_column(
+    mentor_closure_feedback: Mapped[dict[str, Any] | None] = mapped_column(
         JSONB, nullable=True, default=None
     )
-    mentor_confirmed_completion: Mapped[Optional[bool]] = mapped_column(
+    mentor_confirmed_completion: Mapped[bool | None] = mapped_column(
         Boolean, nullable=True, default=None
     )
     status: Mapped[str] = mapped_column(
@@ -75,11 +76,13 @@ class Intern(Base):
         DateTime(timezone=True),
         nullable=False,
         server_default=text("NOW()"),
+        init=False,
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         server_default=text("NOW()"),
+        init=False,
     )
 
 
@@ -122,19 +125,19 @@ class JoiningForm(Base):
     version: Mapped[int] = mapped_column(
         Integer, nullable=False, default=1, server_default=text("1")
     )
-    submitted_at: Mapped[Optional[datetime]] = mapped_column(
+    submitted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None
     )
-    locked_at: Mapped[Optional[datetime]] = mapped_column(
+    locked_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None
     )
-    locked_by: Mapped[Optional[UUID]] = mapped_column(
+    locked_by: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
         default=None,
     )
-    locked_by_label: Mapped[Optional[str]] = mapped_column(
+    locked_by_label: Mapped[str | None] = mapped_column(
         String(50), nullable=True, default=None
     )
     declaration_signed: Mapped[bool] = mapped_column(
@@ -144,4 +147,5 @@ class JoiningForm(Base):
         DateTime(timezone=True),
         nullable=False,
         server_default=text("NOW()"),
+        init=False,
     )

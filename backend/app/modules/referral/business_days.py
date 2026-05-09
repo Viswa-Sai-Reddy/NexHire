@@ -36,7 +36,7 @@ async def _holidays_in_range(
     rows = await session.execute(
         select(Holiday.date).where(Holiday.date >= start, Holiday.date <= end)
     )
-    return {cast(date, row[0]) for row in rows}
+    return {cast("date", row[0]) for row in rows}
 
 
 async def add_business_days(

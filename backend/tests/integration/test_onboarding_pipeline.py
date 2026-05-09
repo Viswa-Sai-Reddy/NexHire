@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.auth.models import ActionToken, User
 from app.modules.onboarding import auto_lock, magic_link, non_worker_id, service
-from app.modules.onboarding.models import Intern, JoiningForm
+from app.modules.onboarding.models import JoiningForm
 from app.modules.referral import pan_crypto
 from app.modules.referral.models import Referral
 from app.shared.constants import (
@@ -17,7 +17,6 @@ from app.shared.constants import (
     UserRole,
 )
 from tests.factories import future_dates, make_college, make_user, random_pan
-
 
 pytestmark = pytest.mark.asyncio
 
@@ -123,9 +122,13 @@ class TestSubmitAutoLock:
 
         _ = user
 
-    async def test_name_mismatch_routes_to_hr(
+    async def test_name_mismatch_still_auto_locks(
         self, session: AsyncSession
     ) -> None:
+        """Flagged forms still auto-lock; flags are persisted on
+        `ai_auto_actions` so HR can recall within the existing window
+        if needed.
+        """
         referral = await _approved_referral(session)
         _, intern, _ = await magic_link.provision_candidate(
             session,
@@ -133,7 +136,6 @@ class TestSubmitAutoLock:
             candidate_email=referral.candidate_email,
             candidate_name=referral.candidate_name,
         )
-        # Form with completely different name → HIGH severity flag.
         form = (
             await session.execute(
                 select(JoiningForm).where(JoiningForm.intern_id == intern.id)
@@ -149,15 +151,28 @@ class TestSubmitAutoLock:
         form.declaration_signed = True
         await session.flush()
 
-        # Need an HR user for the auto-router fallback.
-        await make_user(session, role="HR")
-
         result = await service.submit(session, intern_id=intern.id)
-        assert result.decision == "ROUTED_TO_HR"
+
+        assert result.decision == "AUTO_LOCK"
         assert any(
             "differs from the referral" in f.message
             for f in result.high_flags
         )
+
+        await session.refresh(form)
+        assert form.status == JoiningFormStatus.LOCKED.value
+        assert form.locked_by_label == "AI_AUTO_LOCK"
+
+        from app.modules.referral.models import AiAutoAction
+
+        action = (
+            await session.execute(
+                select(AiAutoAction).where(AiAutoAction.intern_id == intern.id)
+            )
+        ).scalar_one()
+        assert action.decision == "EXECUTED"
+        assert action.flags is not None
+        assert any("differs from the referral" in f for f in action.flags)
 
 
 class TestNonWorkerId:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, EmailStr, Field
@@ -9,12 +10,32 @@ from pydantic import BaseModel, EmailStr, Field
 from app.shared.constants import UserRole
 
 
-class AzureAdLoginRequest(BaseModel):
-    """Body of POST /auth/login. Frontend MSAL has just acquired an ID
-    token from Azure AD; we exchange it for a NexHire JWT.
-    """
+class LoginRequest(BaseModel):
+    """Body of POST /auth/login. Email + password authentication."""
 
-    azure_id_token: str = Field(..., min_length=10)
+    email: EmailStr
+    password: str = Field(..., min_length=1, max_length=128)
+
+
+# Roles that humans can self-register as. Excludes SYSTEM (AI actor) and
+# CANDIDATE (created automatically when a referral is approved).
+RegistrableRole = Literal[
+    "REFERRER",
+    "MENTOR",
+    "HR",
+    "IT_AD",
+    "ADMIN",
+    "PROGRAM_OWNER",
+]
+
+
+class RegisterRequest(BaseModel):
+    """Body of POST /auth/register. Self-serve account creation."""
+
+    email: EmailStr
+    full_name: str = Field(..., min_length=1, max_length=255)
+    password: str = Field(..., min_length=8, max_length=128)
+    role: RegistrableRole
 
 
 class TokenResponse(BaseModel):
@@ -30,7 +51,9 @@ class RefreshRequest(BaseModel):
 
 class CurrentUserResponse(BaseModel):
     user_id: UUID
-    email: EmailStr
+    # Plain str (not EmailStr) so reserved-domain seeds like
+    # `program-owner@example.com` don't fail response validation.
+    email: str
     full_name: str
     role: UserRole
     can_mentor: bool

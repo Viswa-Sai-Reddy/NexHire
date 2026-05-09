@@ -10,6 +10,8 @@ Critical guarantees:
 """
 from __future__ import annotations
 
+from datetime import UTC
+
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -30,13 +32,12 @@ from app.shared.exceptions import (
 )
 from tests.factories import future_dates, make_college, make_user, random_pan
 
-
 pytestmark = pytest.mark.asyncio
 
 
 async def _seed_accepted_referral(
     session: AsyncSession,
-) -> tuple[Referral, "object", "object"]:
+) -> tuple[Referral, object, object]:
     referrer = await make_user(session, role="REFERRER")
     mentor = await make_user(session, role="MENTOR", can_mentor=True)
     college = await make_college(session)
@@ -68,14 +69,14 @@ async def _seed_accepted_referral(
     await session.flush()
 
     # Pre-existing accepted assignment.
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
     assignment = MentorAssignment(
         referral_id=referral.id,
         mentor_id=mentor.id,
         attempt_number=1,
         status=MentorAssignmentStatus.ACCEPTED.value,
-        timeout_at=datetime.now(timezone.utc) + timedelta(days=3),
+        timeout_at=datetime.now(UTC) + timedelta(days=3),
     )
     session.add(assignment)
     await session.flush()

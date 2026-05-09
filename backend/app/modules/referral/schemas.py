@@ -14,7 +14,7 @@ shape with everything optional via `model_partial=True`.
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Literal, Optional
+from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, EmailStr, Field, field_validator
@@ -138,7 +138,7 @@ class ReferralSummary(BaseModel):
     status: str
     current_stage: str
     candidate_name: str
-    candidate_email: EmailStr
+    candidate_email: str  # response only — not re-validated
     pan_masked: str
     college_id: UUID
     project_title: str | None = None
@@ -146,6 +146,10 @@ class ReferralSummary(BaseModel):
     mentor_id: UUID | None = None
     mentor_attempt_count: int
     created_at: datetime
+    # Populated once the referral has been approved and an Intern row
+    # exists. Lets the caller drive lifecycle actions (e.g. terminate).
+    intern_id: UUID | None = None
+    intern_status: str | None = None
 
 
 class ReferralDetail(ReferralSummary):
@@ -185,7 +189,10 @@ class CollegeSearchResult(BaseModel):
 class MentorPickerEntry(BaseModel):
     user_id: UUID
     full_name: str
-    email: EmailStr
+    # Internal email — return as plain str so reserved-domain placeholders
+    # (e.g. ai-system@nexhire.internal) don't trip EmailStr re-validation
+    # on the response path.
+    email: str
     active_mentees: int
     threshold: int
     available: bool
@@ -207,7 +214,7 @@ class MentorRadar(BaseModel):
 class MentorSuggestion(BaseModel):
     user_id: UUID
     full_name: str
-    email: EmailStr
+    email: str  # see MentorPickerEntry note
     active_mentees: int
     threshold: int
     match_score: int = Field(..., ge=0, le=100)

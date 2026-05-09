@@ -26,7 +26,7 @@ import logging
 import re
 import unicodedata
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import UUID
 
@@ -116,7 +116,7 @@ async def fuzzy_match(
     norm_phone = _normalize_phone(candidate_phone)
     norm_name = _normalize_name(candidate_name)
 
-    cutoff = datetime.now(timezone.utc) - timedelta(days=30 * RESUME_RETENTION_MONTHS)
+    cutoff = datetime.now(UTC) - timedelta(days=30 * RESUME_RETENTION_MONTHS)
     excluded_terminal = (
         ReferralStatus.NDA_DECLINED_REJECTED.value,
         ReferralStatus.NDA_TIMEOUT_REJECTED.value,
@@ -136,8 +136,6 @@ async def fuzzy_match(
 
     matches: list[FuzzyMatch] = []
     for existing in candidates:
-        if existing.candidate_email is None:
-            continue
         score, reasons = _score_pair(
             existing,
             norm_name=norm_name,
@@ -197,9 +195,9 @@ def _score_pair(
 
 
 __all__ = [
+    "MODEL_TOUCHPOINT",
     "FuzzyDuplicateResult",
     "FuzzyMatch",
-    "MODEL_TOUCHPOINT",
     "Recommendation",
     "fuzzy_match",
 ]

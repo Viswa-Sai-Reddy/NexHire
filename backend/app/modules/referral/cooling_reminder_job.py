@@ -10,7 +10,7 @@ referral so the daily scheduler stays idempotent across re-runs.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from app.infrastructure.database import get_sessionmaker
 from app.infrastructure.scheduler import (
@@ -18,8 +18,8 @@ from app.infrastructure.scheduler import (
     idempotent_job,
     register_cron_job,
 )
-from app.modules.referral import cooling_period_service
 from app.middleware import audit
+from app.modules.referral import cooling_period_service
 from app.shared.constants import AI_SYSTEM_USER_ID
 
 logger = logging.getLogger("nexhire.cooling.reminder_job")
@@ -36,7 +36,7 @@ async def run_daily_reminders() -> None:
         ending_soon = await cooling_period_service.find_cooling_ending_in_days(
             session, days=7
         )
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         for referral in ending_soon:
             referral.reminder_7d_sent_at = now
             await audit.publish(

@@ -18,10 +18,8 @@ from app.modules.auth.rbac import Permission, require
 from app.modules.referral.models import Task
 from app.shared.constants import (
     TaskStatus,
-    TaskType,
     UserRole,
 )
-
 
 access_router = APIRouter(prefix="/tasks", tags=["tasks"])
 

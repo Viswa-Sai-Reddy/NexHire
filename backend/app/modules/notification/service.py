@@ -13,16 +13,16 @@ operational logs (Blueprint §8 + GDPR-style minimization).
 """
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import logging
+from datetime import UTC
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.config import get_settings
+from app.infrastructure import gmail_client
 from app.modules.notification import template_renderer
 from app.modules.referral.models import Notification, NotificationTemplate
 from app.shared.exceptions import GmailApiError
@@ -88,9 +88,9 @@ async def send_template(
         )
         notification.gmail_message_id = message_id
         notification.status = "SENT"
-        from datetime import datetime, timezone
+        from datetime import datetime
 
-        notification.sent_at = datetime.now(timezone.utc)
+        notification.sent_at = datetime.now(UTC)
     except Exception as exc:
         # Don't crash the surrounding transaction. The retry worker
         # will pick this up; the row stays at FAILED.
@@ -108,48 +108,16 @@ async def send_template(
     return notification
 
 
-# ────────────────────────────────────────────────────────────────────
-# Gmail send — wraps the synchronous googleapiclient via to_thread.
-# Real implementation lands when GMAIL credentials are available; in
-# dev the env-var GMAIL_SERVICE_ACCOUNT_JSON_PATH is empty and we
-# log + return a fake message id so the rest of the pipeline still
-# exercises end-to-end.
-# ────────────────────────────────────────────────────────────────────
 async def _gmail_send(
     *, to: str, subject: str, html: str, plain: str | None
 ) -> str:
-    cfg = get_settings()
-    if not cfg.gmail_service_account_json_path or not cfg.gmail_sender_email:
-        logger.info(
-            "nexhire.notification.dev_send",
-            extra={"to_domain": _redact_email(to), "subject": subject[:80]},
-        )
-        return f"dev-{hashlib.sha1(html.encode()).hexdigest()[:16]}"
-
-    from app.infrastructure import gmail_client
-
-    def _send_blocking() -> str:
-        service = gmail_client.get_service()
-        body = gmail_client._build_mime(  # noqa: SLF001 — internal helper
-            to=to,
-            subject=subject,
-            sender=cfg.gmail_sender_email,
-            html=html,
-            plain=plain,
-        )
-        result = (
-            service.users()
-            .messages()
-            .send(userId="me", body={"raw": body})
-            .execute()
-        )
-        return str(result.get("id", ""))
-
-    try:
-        return await asyncio.to_thread(_send_blocking)
-    except Exception as exc:  # noqa: BLE001 — preserve original cause
-        logger.exception("nexhire.notification.gmail_failed")
-        raise GmailApiError() from exc
+    """Thin shim around `gmail_client.send_html` — kept so the call site
+    above stays readable and so test seams don't have to monkeypatch the
+    infrastructure module.
+    """
+    return await gmail_client.send_html(
+        to=to, subject=subject, html_body=html, plain_fallback=plain
+    )
 
 
 def _filename_for(template_id: str) -> str:

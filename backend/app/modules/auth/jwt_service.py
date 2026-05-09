@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import base64
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from typing import Any
 from uuid import UUID
@@ -80,7 +80,7 @@ def issue_access_token(
 ) -> tuple[str, int]:
     """Sign and return (access_token, expires_in_seconds)."""
     cfg = get_settings()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     exp = now + timedelta(seconds=cfg.jwt_access_ttl_seconds)
     claims: dict[str, Any] = {
         "sub": str(user_id),
@@ -117,5 +117,5 @@ def issue_refresh_token() -> tuple[str, datetime]:
 
     cfg = get_settings()
     raw = secrets.token_urlsafe(32)
-    expires_at = datetime.now(timezone.utc) + timedelta(seconds=cfg.jwt_refresh_ttl_seconds)
+    expires_at = datetime.now(UTC) + timedelta(seconds=cfg.jwt_refresh_ttl_seconds)
     return raw, expires_at

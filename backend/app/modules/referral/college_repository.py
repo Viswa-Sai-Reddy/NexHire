@@ -73,19 +73,22 @@ async def search(
         )
     ).mappings().all()
 
-    return [
-        College(
+    out: list[College] = []
+    for row in rows:
+        college = College(
             id=row["id"],
             canonical_name=row["canonical_name"],
             aliases=row["aliases"] or [],
             location_state=row["location_state"],
             type=row["type"],
             is_verified=row["is_verified"],
-            created_at=row["created_at"],
-            updated_at=row["updated_at"],
         )
-        for row in rows
-    ]
+        # `created_at` / `updated_at` are server-defaulted (init=False); set
+        # post-init since this hydration path uses raw SQL, not the ORM.
+        college.created_at = row["created_at"]
+        college.updated_at = row["updated_at"]
+        out.append(college)
+    return out
 
 
 async def get_active_referral_count(

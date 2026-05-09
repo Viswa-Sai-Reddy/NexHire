@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import cast
 from uuid import UUID
 
@@ -27,7 +27,6 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.middleware import audit
-from app.modules.auth.models import User
 from app.modules.referral.models import Task
 from app.shared.constants import (
     AI_SYSTEM_USER_ID,
@@ -101,7 +100,7 @@ async def pick_assignee(
     if rows:
         chosen = rows[0]
         return RoutingDecision(
-            user_id=cast(UUID, chosen["id"]),
+            user_id=cast("UUID", chosen["id"]),
             open_task_count=int(chosen["open_count"] or 0),
             avg_response_hours=(
                 float(chosen["avg_response_hours"])
@@ -156,7 +155,7 @@ async def _fallback(
         },
     )
     return RoutingDecision(
-        user_id=cast(UUID, fallback),
+        user_id=cast("UUID", fallback),
         open_task_count=0,
         avg_response_hours=None,
         reason="Fallback: all role members OOO; assigned oldest active member.",
@@ -223,7 +222,7 @@ async def create_routed_task(
             "referral_id": str(referral_id) if referral_id else None,
             "intern_id": str(intern_id) if intern_id else None,
             "sla_deadline": sla_deadline.isoformat(),
-            "routed_at": datetime.now(timezone.utc).isoformat(),
+            "routed_at": datetime.now(UTC).isoformat(),
         },
         session=session,
     )

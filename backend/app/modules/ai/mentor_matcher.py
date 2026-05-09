@@ -239,7 +239,7 @@ async def suggest_mentors(
                               WHERE r.mentor_id = u.id),
                            ARRAY[]::text[]
                        ) AS mentor_states,
-                       u.full_name AS skills_placeholder
+                       u.skills AS skills
                 FROM users u
                 WHERE u.can_mentor = true
                   AND u.is_active = true
@@ -303,14 +303,19 @@ async def suggest_mentors(
     return enriched
 
 
-def _mentor_skills(_row: Any) -> list[str]:
-    """Mentor skill set is not yet stored on `users` — placeholder hook
-    so the Jaccard scorer has a list to work with. S2.9 (frontend
-    onboarding for mentor profile editing) wires real skills; until
-    then `_score_skill` produces 0 for everyone, which means the other
-    four dimensions drive the ranking. Acceptable for v1: capacity +
-    history + familiarity + response speed are the high-signal axes.
+def _mentor_skills(row: Any) -> list[str]:
+    """Reads `users.skills` (JSONB list[str]).
+
+    Mentors set their own skills via `PUT /auth/me/skills`; HR/PO can
+    push bulk seeds for legacy users. Empty list is fine — `_score_skill`
+    just returns 0 for that mentor and the other four radar axes drive
+    the ranking.
     """
+    raw = row.get("skills") if hasattr(row, "get") else row["skills"]
+    if not raw:
+        return []
+    if isinstance(raw, list):
+        return [str(s).lower() for s in raw if s]
     return []
 
 
@@ -385,7 +390,7 @@ async def _add_ai_reasons(
     except (AzureOpenAiError, AzureOpenAiQuotaExceededError, json.JSONDecodeError):
         logger.warning("nexhire.ai.mentor_matcher.reason_unavailable")
         return recommendations
-    except Exception:  # noqa: BLE001 — narrative is best-effort
+    except Exception:
         logger.exception("nexhire.ai.mentor_matcher.reason_unexpected")
         return recommendations
 
@@ -412,7 +417,7 @@ async def _get_cache(key: str) -> list[MentorRecommendation] | None:
     try:
         client = await redis_client.get_client()
         raw = await client.get(key)
-    except Exception:  # noqa: BLE001 — cache is best-effort
+    except Exception:
         return None
     if not raw:
         return None
@@ -456,7 +461,7 @@ async def _set_cache(key: str, values: list[MentorRecommendation]) -> None:
     try:
         client = await redis_client.get_client()
         await client.set(key, payload, ex=CACHE_TTL_SECONDS)
-    except Exception:  # noqa: BLE001
+    except Exception:
         return
 
 

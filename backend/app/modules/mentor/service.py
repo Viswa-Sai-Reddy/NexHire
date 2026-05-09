@@ -22,8 +22,7 @@ publish in the same transaction as the state change.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
-from typing import Optional
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import select
@@ -63,7 +62,7 @@ logger = logging.getLogger("nexhire.mentor")
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -185,7 +184,7 @@ async def accept(
     session: AsyncSession,
     *,
     raw_token: str,
-    ip_address: Optional[str] = None,
+    ip_address: str | None = None,
 ) -> MentorAssignment:
     """Mentor clicks Accept. Token is consumed; sibling reject token
     is invalidated; referral transitions MENTOR_PENDING → MENTOR_ACCEPTED.
@@ -204,20 +203,24 @@ async def accept(
         )
     ).scalar_one()
 
+    # Reassignment (decision A14) creates a fresh assignment without
+    # bumping `mentor_attempt_count`, so the lookup is anchored to the
+    # latest PENDING row instead of the counter.
     assignment = (
         await session.execute(
             select(MentorAssignment)
             .where(
                 MentorAssignment.referral_id == referral.id,
                 MentorAssignment.mentor_id == token_row.actor_user_id,
-                MentorAssignment.attempt_number == referral.mentor_attempt_count + 1,
+                MentorAssignment.status == MentorAssignmentStatus.PENDING.value,
             )
+            .order_by(MentorAssignment.attempt_number.desc())
             .limit(1)
         )
     ).scalar_one_or_none()
-    if assignment is None or assignment.status != MentorAssignmentStatus.PENDING.value:
+    if assignment is None:
         raise InvalidStateTransitionError(
-            current_status=assignment.status if assignment else "MISSING",
+            current_status=referral.status,
             attempted_action="ACCEPT",
         )
 
@@ -278,7 +281,7 @@ async def reject(
     *,
     raw_token: str,
     reason: str,
-    ip_address: Optional[str] = None,
+    ip_address: str | None = None,
 ) -> tuple[MentorAssignment, bool]:
     """Mentor declines. Returns (assignment, is_terminal).
 
@@ -302,20 +305,22 @@ async def reject(
             select(Referral).where(Referral.id == token_row.referral_id)
         )
     ).scalar_one()
+    # See `accept` — anchor on the latest PENDING row, not on the counter.
     assignment = (
         await session.execute(
             select(MentorAssignment)
             .where(
                 MentorAssignment.referral_id == referral.id,
                 MentorAssignment.mentor_id == token_row.actor_user_id,
-                MentorAssignment.attempt_number == referral.mentor_attempt_count + 1,
+                MentorAssignment.status == MentorAssignmentStatus.PENDING.value,
             )
+            .order_by(MentorAssignment.attempt_number.desc())
             .limit(1)
         )
     ).scalar_one_or_none()
-    if assignment is None or assignment.status != MentorAssignmentStatus.PENDING.value:
+    if assignment is None:
         raise InvalidStateTransitionError(
-            current_status=assignment.status if assignment else "MISSING",
+            current_status=referral.status,
             attempted_action="REJECT",
         )
 
@@ -374,6 +379,234 @@ async def reject(
             "attempt_number": assignment.attempt_number,
             "reason": reason[:500],
             "is_terminal": is_terminal,
+        },
+        session=session,
+    )
+
+    await get_bus().publish(
+        MentorRejected(
+            referral_id=ReferralId(referral.id),
+            mentor_id=UserId(assignment.mentor_id),
+            attempt_number=assignment.attempt_number,
+            reason=reason[:500],
+            is_terminal=is_terminal,
+        )
+    )
+
+    return assignment, is_terminal
+
+
+# ────────────────────────────────────────────────────────────────────
+# In-app accept / reject — used from the mentor dashboard. The token
+# flow above is unchanged (email link path); these helpers do the same
+# work but authenticate via the mentor's JWT instead of an email token.
+# ────────────────────────────────────────────────────────────────────
+async def accept_by_mentor(
+    session: AsyncSession,
+    *,
+    referral_id: UUID,
+    mentor_user_id: UUID,
+    ip_address: str | None = None,
+) -> MentorAssignment:
+    """Mentor accepts from the dashboard. Mirrors `accept(raw_token=...)`."""
+    referral = (
+        await session.execute(select(Referral).where(Referral.id == referral_id))
+    ).scalar_one_or_none()
+    if referral is None:
+        raise InvalidStateTransitionError(
+            current_status="MISSING", attempted_action="ACCEPT"
+        )
+
+    # Look up the active PENDING assignment for this mentor + referral.
+    # Reassignment (decision A14) creates a fresh assignment without
+    # bumping `mentor_attempt_count`, so we can't anchor the lookup to
+    # `attempt_number == count + 1` — pick the latest pending row instead.
+    assignment = (
+        await session.execute(
+            select(MentorAssignment)
+            .where(
+                MentorAssignment.referral_id == referral.id,
+                MentorAssignment.mentor_id == mentor_user_id,
+                MentorAssignment.status == MentorAssignmentStatus.PENDING.value,
+            )
+            .order_by(MentorAssignment.attempt_number.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if assignment is None:
+        all_rows = (
+            await session.execute(
+                select(MentorAssignment).where(
+                    MentorAssignment.referral_id == referral.id
+                )
+            )
+        ).scalars().all()
+        rows_summary = ", ".join(
+            f"[mentor={row.mentor_id} attempt={row.attempt_number} status={row.status}]"
+            for row in all_rows
+        ) or "<no rows>"
+        diag = (
+            f"accept_by_mentor lookup miss: "
+            f"referral_id={referral.id} "
+            f"principal_user_id={mentor_user_id} "
+            f"referral_mentor_id={referral.mentor_id} "
+            f"referral_status={referral.status} "
+            f"mentor_attempt_count={referral.mentor_attempt_count} "
+            f"assignment_rows={rows_summary}"
+        )
+        logger.warning(diag)
+        raise InvalidStateTransitionError(
+            current_status=f"{referral.status} (DEBUG: {rows_summary})",
+            attempted_action="ACCEPT",
+        )
+
+    now = _utcnow()
+    assignment.status = MentorAssignmentStatus.ACCEPTED.value
+    assignment.responded_at = now
+
+    # Invalidate the still-outstanding accept/reject email tokens so the
+    # mentor can't double-respond from their inbox.
+    await action_tokens.invalidate_siblings(
+        session,
+        referral_id=referral.id,
+        action_type=ActionTokenType.MENTOR_RESPONSE,
+    )
+
+    referral.status = ReferralStatus.MENTOR_ACCEPTED.value
+    referral.current_stage = ReferralStatus.MENTOR_ACCEPTED.value
+    referral.stage_entered_at = now
+    referral.mentor_id = assignment.mentor_id
+    referral.mentor_attempt_count += 1
+    referral.updated_at = now
+
+    _record_stage_history(
+        session,
+        referral_id=referral.id,
+        from_status=ReferralStatus.MENTOR_PENDING.value,
+        to_status=ReferralStatus.MENTOR_ACCEPTED.value,
+        actor_id=assignment.mentor_id,
+        actor_role="MENTOR",
+        reason="Mentor accepted (dashboard)",
+    )
+
+    await audit.publish(
+        event_type="MENTOR_ACCEPTED",
+        entity_type="REFERRAL",
+        entity_id=referral.id,
+        actor_user_id=assignment.mentor_id,
+        actor_role="MENTOR",
+        ip_address=ip_address,
+        payload={"mentor_id": str(assignment.mentor_id), "via": "dashboard"},
+        session=session,
+    )
+
+    await get_bus().publish(
+        MentorAccepted(
+            referral_id=ReferralId(referral.id),
+            mentor_id=UserId(assignment.mentor_id),
+        )
+    )
+
+    return assignment
+
+
+async def reject_by_mentor(
+    session: AsyncSession,
+    *,
+    referral_id: UUID,
+    mentor_user_id: UUID,
+    reason: str,
+    ip_address: str | None = None,
+) -> tuple[MentorAssignment, bool]:
+    """Mentor declines from the dashboard. Mirrors `reject(raw_token=...)`."""
+    if not reason or len(reason.strip()) < 10:
+        raise MentorRejectionReasonMissingError()
+
+    referral = (
+        await session.execute(select(Referral).where(Referral.id == referral_id))
+    ).scalar_one_or_none()
+    if referral is None:
+        raise InvalidStateTransitionError(
+            current_status="MISSING", attempted_action="REJECT"
+        )
+
+    # See `accept_by_mentor` — pick the latest PENDING row for this
+    # mentor + referral so reassigned attempts (which don't bump the
+    # counter) can still be rejected from the dashboard.
+    assignment = (
+        await session.execute(
+            select(MentorAssignment)
+            .where(
+                MentorAssignment.referral_id == referral.id,
+                MentorAssignment.mentor_id == mentor_user_id,
+                MentorAssignment.status == MentorAssignmentStatus.PENDING.value,
+            )
+            .order_by(MentorAssignment.attempt_number.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+    if assignment is None:
+        raise InvalidStateTransitionError(
+            current_status=referral.status,
+            attempted_action="REJECT",
+        )
+
+    now = _utcnow()
+    assignment.status = MentorAssignmentStatus.REJECTED.value
+    assignment.responded_at = now
+    assignment.rejection_reason = reason.strip()
+
+    await action_tokens.invalidate_siblings(
+        session,
+        referral_id=referral.id,
+        action_type=ActionTokenType.MENTOR_RESPONSE,
+    )
+
+    referral.mentor_attempt_count += 1
+    is_terminal = referral.mentor_attempt_count >= MAX_MENTOR_ATTEMPTS
+    if is_terminal:
+        referral.status = ReferralStatus.CANDIDATE_REJECTED.value
+        referral.current_stage = ReferralStatus.CANDIDATE_REJECTED.value
+        referral.rejected_at = now
+        referral.rejection_reason = "MAX_MENTOR_ATTEMPTS_EXCEEDED"
+        _record_stage_history(
+            session,
+            referral_id=referral.id,
+            from_status=ReferralStatus.MENTOR_PENDING.value,
+            to_status=ReferralStatus.CANDIDATE_REJECTED.value,
+            actor_id=assignment.mentor_id,
+            actor_role="MENTOR",
+            reason="Max mentor attempts exceeded after rejection",
+        )
+    else:
+        referral.status = ReferralStatus.MENTOR_PENDING.value
+        referral.current_stage = ReferralStatus.MENTOR_PENDING.value
+        _record_stage_history(
+            session,
+            referral_id=referral.id,
+            from_status=ReferralStatus.MENTOR_PENDING.value,
+            to_status=ReferralStatus.MENTOR_PENDING.value,
+            actor_id=assignment.mentor_id,
+            actor_role="MENTOR",
+            reason=f"Mentor rejected attempt {assignment.attempt_number} (dashboard): {reason[:200]}",
+        )
+
+    referral.stage_entered_at = now
+    referral.updated_at = now
+
+    await audit.publish(
+        event_type="MENTOR_REJECTED",
+        entity_type="REFERRAL",
+        entity_id=referral.id,
+        actor_user_id=assignment.mentor_id,
+        actor_role="MENTOR",
+        ip_address=ip_address,
+        payload={
+            "mentor_id": str(assignment.mentor_id),
+            "attempt_number": assignment.attempt_number,
+            "reason": reason[:500],
+            "is_terminal": is_terminal,
+            "via": "dashboard",
         },
         session=session,
     )
@@ -523,7 +756,7 @@ async def reassign_by_hr(
     referral_id: UUID,
     new_mentor_id: UUID,
     hr_user_id: UUID,
-    hr_role: "str",
+    hr_role: str,
     reason: str,
 ) -> MentorAssignment:
     """Replace the active mentor mid-flow.

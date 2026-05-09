@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% block content %}
+  <h1 style="margin:0 0 16px;font-size:24px;font-weight:600;line-height:1.2;color:#0f172a;">
+    Offer of Internship — Welcome to NexHire
+  </h1>
+  <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#0f172a;">
+    Dear {{ candidate_name }},
+  </p>
+  <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">
+    Congratulations! We're delighted to confirm your internship with NexHire.
+    Your NDA has been received and your access provisioning is being arranged
+    so you can start on time.
+  </p>
+
+  <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:16px 0 24px;width:100%;border:1px solid #e2e8f0;border-radius:8px;">
+    <tr>
+      <td style="padding:14px 16px;font-size:14px;color:#0f172a;">
+        <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+          <tr>
+            <td style="padding:4px 0;color:#64748b;">Project</td>
+            <td style="padding:4px 0;text-align:right;">{{ project_title }}</td>
+          </tr>
+          {% if mentor_name %}
+          <tr>
+            <td style="padding:4px 0;color:#64748b;">Mentor</td>
+            <td style="padding:4px 0;text-align:right;">{{ mentor_name }}</td>
+          </tr>
+          {% endif %}
+          <tr>
+            <td style="padding:4px 0;color:#64748b;">Start date</td>
+            <td style="padding:4px 0;text-align:right;">{{ start_date }}</td>
+          </tr>
+          <tr>
+            <td style="padding:4px 0;color:#64748b;">End date</td>
+            <td style="padding:4px 0;text-align:right;">{{ end_date }}</td>
+          </tr>
+          <tr>
+            <td style="padding:4px 0;color:#64748b;">Location</td>
+            <td style="padding:4px 0;text-align:right;">{{ joining_location }}</td>
+          </tr>
+          <tr>
+            <td style="padding:4px 0;color:#64748b;">Non-Worker ID</td>
+            <td style="padding:4px 0;text-align:right;font-family:monospace;">{{ non_worker_id }}</td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+
+  <h2 style="margin:24px 0 8px;font-size:16px;font-weight:600;color:#0f172a;">
+    Terms of engagement
+  </h2>
+  <ul style="margin:0 0 16px 18px;padding:0;font-size:14px;line-height:1.6;color:#334155;">
+    <li>This is an unpaid internship limited to the dates above.</li>
+    <li>You'll be expected to attend on-site at the listed location.</li>
+    <li>The signed NDA on file remains binding for the duration of the program and after.</li>
+    <li>Successful completion is contingent on mentor closure feedback at the end of the term.</li>
+  </ul>
+
+  {% if portal_url %}
+  <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:24px 0;">
+    <tr>
+      <td>
+        <a href="{{ portal_url }}"
+           style="display:inline-block;background:#2563eb;color:#ffffff;text-decoration:none;padding:12px 22px;border-radius:8px;font-size:14px;font-weight:500;">
+          Open my candidate portal
+        </a>
+      </td>
+    </tr>
+  </table>
+  {% endif %}
+
+  <p style="margin:16px 0 0;font-size:13px;color:#64748b;">
+    A signed PDF copy of this offer is attached to your candidate portal under
+    Documents. You'll receive your AD account credentials and badge details
+    in a separate email closer to your start date.
+  </p>
+{% endblock %}
+
+{% block footer %}
+  <br />
+  Questions? Reply to this email and HR will respond.
+{% endblock %}

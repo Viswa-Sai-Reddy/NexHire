@@ -4,7 +4,11 @@
     user + intern + first magic-link token. Notification module also
     subscribes (S5) to email the candidate; the magic-link token is
     placed inside the email body.
-  * `JoiningFormLocked` → auto-generate Non-Worker ID + advance status.
+
+NW-ID generation no longer runs as a `JoiningFormLocked` handler — it
+runs inline inside `auto_lock._auto_lock` so it shares the lock's
+transaction (silent rollbacks were leaving candidates locked but
+without a Non-Worker ID).
 """
 from __future__ import annotations
 
@@ -12,7 +16,7 @@ import logging
 
 from app.infrastructure.database import get_sessionmaker
 from app.infrastructure.event_bus import InProcessEventBus
-from app.modules.onboarding import auto_lock, magic_link, service
+from app.modules.onboarding import magic_link
 from app.shared.domain_events import ReferralApproved
 
 logger = logging.getLogger("nexhire.onboarding.handlers")
@@ -35,4 +39,3 @@ async def on_referral_approved(event: ReferralApproved) -> None:
 
 def register(bus: InProcessEventBus) -> None:
     bus.subscribe(ReferralApproved, on_referral_approved)
-    bus.subscribe(auto_lock.JoiningFormLocked, service.on_joining_form_locked)

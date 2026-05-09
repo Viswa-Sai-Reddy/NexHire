@@ -37,6 +37,8 @@ backend/static/
 .env.*.local
 *.pem
 *.key
+backend/.secrets/
+**/.secrets/
 
 # ── IDE ────────────────────────────────────────────────
 .vscode/*

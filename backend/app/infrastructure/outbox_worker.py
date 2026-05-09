@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -72,12 +72,12 @@ async def _retry_one(session: AsyncSession, row: OutboxEvent) -> None:
     handler function/class on its declaring module. Failure → bump
     retry_count; if it crosses MAX_RETRIES → DEAD_LETTERED.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     try:
         event = _hydrate_event(row)
         handler = _resolve_handler(row.handler_class)
         await handler(event)
-    except Exception as exc:  # noqa: BLE001 — outbox retry is best-effort
+    except Exception as exc:
         row.retry_count += 1
         row.last_error = str(exc)[:1_000]
         if row.retry_count >= MAX_RETRIES:

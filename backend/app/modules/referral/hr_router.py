@@ -15,8 +15,8 @@ Endpoints:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
-from typing import Optional
+from datetime import UTC, date, datetime, timedelta
+from typing import Any, Optional
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
@@ -28,6 +28,7 @@ from app.infrastructure.database import get_session
 from app.middleware.auth import CurrentUser
 from app.middleware.rate_limit import rate_limit
 from app.modules.auth.rbac import Permission, require
+from app.modules.mentor import service as mentor_service
 from app.modules.referral import repository
 from app.modules.referral.models import (
     AiAutoAction,
@@ -37,7 +38,6 @@ from app.modules.referral.models import (
     RiskProfile,
     Task,
 )
-from app.modules.mentor import service as mentor_service
 from app.modules.referral.schemas import ReferralDetail, ReferralSummary
 from app.modules.workflow import hr_service, recall
 from app.shared.constants import (
@@ -45,7 +45,6 @@ from app.shared.constants import (
     TaskStatus,
     TaskType,
 )
-
 
 logger = logging.getLogger("nexhire.router.hr")
 
@@ -103,13 +102,42 @@ class RecentAiActionsResponse(BaseModel):
     items: list[RecentAiActionEntry]
 
 
+class HrAllReferralsResponse(BaseModel):
+    total: int
+    items: list[ReferralSummary]
+
+
+class HrInternEntry(BaseModel):
+    intern_id: UUID
+    referral_id: UUID
+    non_worker_id: str
+    candidate_name: str
+    candidate_email: str
+    intern_status: str
+    referral_status: str
+    project_title: str | None
+    joining_location: str | None
+    internship_start_date: date | None
+    internship_end_date: date | None
+    actual_start_date: date | None
+    actual_end_date: date | None
+    created_at: datetime
+
+
+class HrInternsResponse(BaseModel):
+    total: int
+    items: list[HrInternEntry]
+    limit: int
+    offset: int
+
+
 class HrReviewContext(BaseModel):
     """Full context the HR Review Panel (S12) renders for one referral."""
 
     referral: ReferralDetail
     risk_score: int | None = None
     risk_classification: str | None = None
-    risk_factors: list[dict] = Field(default_factory=list)
+    risk_factors: list[dict[str, Any]] = Field(default_factory=list)
     risk_narrative: str | None = None
     duplicate_recommendation: str | None = None
     duplicate_similarity: float | None = None
@@ -173,6 +201,132 @@ async def hr_queue(
 
 
 @hr_router.get(
+    "/all",
+    response_model=HrAllReferralsResponse,
+    dependencies=[Depends(require(Permission.VIEW_ALL_REFERRALS))],
+    summary="Paginated list of all referrals — HR/PO audit view.",
+)
+async def hr_list_all(
+    status: str | None = Query(default=None, description="Filter by status, e.g. APPROVED"),
+    college_id: UUID | None = Query(default=None),
+    q: str | None = Query(default=None, description="Substring match on candidate_name or candidate_email"),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    session: AsyncSession = Depends(get_session),
+) -> HrAllReferralsResponse:
+    from sqlalchemy import func, or_
+
+    where_clauses: list[Any] = []
+    if status:
+        where_clauses.append(Referral.status == status)
+    if college_id is not None:
+        where_clauses.append(Referral.college_id == college_id)
+    if q:
+        like = f"%{q.strip().lower()}%"
+        where_clauses.append(
+            or_(
+                func.lower(Referral.candidate_name).like(like),
+                func.lower(Referral.candidate_email).like(like),
+            )
+        )
+
+    base = select(Referral)
+    count_q = select(func.count()).select_from(Referral)
+    for clause in where_clauses:
+        base = base.where(clause)
+        count_q = count_q.where(clause)
+
+    total = (await session.execute(count_q)).scalar_one()
+    rows = (
+        await session.execute(
+            base.order_by(Referral.created_at.desc()).offset(offset).limit(limit)
+        )
+    ).scalars().all()
+
+    items = [ReferralSummary(**_referral_summary_dict(r)) for r in rows]
+    return HrAllReferralsResponse(total=int(total), items=items)
+
+
+@hr_router.get(
+    "/interns",
+    response_model=HrInternsResponse,
+    dependencies=[Depends(require(Permission.VIEW_ALL_REFERRALS))],
+    summary="Paginated list of interns with their assigned Non-Worker IDs.",
+)
+async def hr_list_interns(
+    intern_status: str | None = Query(default=None, description="Filter by intern status, e.g. ACTIVE"),
+    q: str | None = Query(
+        default=None,
+        description="Substring match on non_worker_id, candidate_name, or candidate_email",
+    ),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    session: AsyncSession = Depends(get_session),
+) -> HrInternsResponse:
+    """Roster view for HR / Program Owner. Returns every intern that has
+    been assigned a Non-Worker ID (the field is populated when the
+    joining form is locked). Use this for badge collection support, audit
+    rosters, and "candidate forgot their NW-ID" lookups.
+    """
+    from sqlalchemy import func, or_
+
+    from app.modules.onboarding.models import Intern
+
+    where_clauses: list[Any] = [Intern.non_worker_id.isnot(None)]
+    if intern_status:
+        where_clauses.append(Intern.status == intern_status)
+    if q:
+        like = f"%{q.strip().lower()}%"
+        where_clauses.append(
+            or_(
+                func.lower(Intern.non_worker_id).like(like),
+                func.lower(Referral.candidate_name).like(like),
+                func.lower(Referral.candidate_email).like(like),
+            )
+        )
+
+    base = select(Intern, Referral).join(Referral, Referral.id == Intern.referral_id)
+    count_q = (
+        select(func.count())
+        .select_from(Intern)
+        .join(Referral, Referral.id == Intern.referral_id)
+    )
+    for clause in where_clauses:
+        base = base.where(clause)
+        count_q = count_q.where(clause)
+
+    total = (await session.execute(count_q)).scalar_one()
+    rows = (
+        await session.execute(
+            base.order_by(Intern.created_at.desc()).offset(offset).limit(limit)
+        )
+    ).all()
+
+    items = [
+        HrInternEntry(
+            intern_id=intern.id,
+            referral_id=referral.id,
+            non_worker_id=intern.non_worker_id,
+            candidate_name=referral.candidate_name,
+            candidate_email=referral.candidate_email,
+            intern_status=intern.status,
+            referral_status=referral.status,
+            project_title=referral.project_title,
+            joining_location=referral.joining_location,
+            internship_start_date=referral.internship_start_date,
+            internship_end_date=referral.internship_end_date,
+            actual_start_date=intern.actual_start_date,
+            actual_end_date=intern.actual_end_date,
+            created_at=intern.created_at,
+        )
+        for intern, referral in rows
+    ]
+    return HrInternsResponse(
+        total=int(total), items=items, limit=limit, offset=offset
+    )
+
+
+@hr_router.get(
     "/recent-ai",
     response_model=RecentAiActionsResponse,
     dependencies=[Depends(require(Permission.RECALL_AI_AUTO_ACTION))],
@@ -181,7 +335,7 @@ async def hr_queue(
 async def recent_ai_actions(
     session: AsyncSession = Depends(get_session),
 ) -> RecentAiActionsResponse:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     cutoff = now - timedelta(hours=max(recall.RECALL_HOURS.values()) + 1)
     rows = (
         await session.execute(
@@ -203,7 +357,7 @@ async def recent_ai_actions(
         items.append(
             RecentAiActionEntry(
                 auto_action_id=row.id,
-                referral_id=row.referral_id,  # type: ignore[arg-type]
+                referral_id=row.referral_id,
                 action_type=row.action_type,
                 decision=row.decision,
                 executed_at=row.executed_at,
@@ -293,7 +447,7 @@ async def review_context(
 
     risk_classification = _classify_risk(risk.risk_score) if risk else None
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     recall_ends = None
     recall_active = False
     if auto_action is not None and auto_action.action_type in recall.RECALL_HOURS:
@@ -472,7 +626,7 @@ async def recall_endpoint(
 # ────────────────────────────────────────────────────────────────────
 # Helpers.
 # ────────────────────────────────────────────────────────────────────
-def _referral_summary_dict(r: Referral) -> dict:
+def _referral_summary_dict(r: Referral) -> dict[str, Any]:
     return {
         "id": r.id,
         "status": r.status,

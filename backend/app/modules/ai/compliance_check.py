@@ -159,4 +159,4 @@ async def _check_intern(session: AsyncSession, intern: Intern) -> ComplianceResu
     )
 
 
-__all__ = ["ComplianceResult", "MODEL_TOUCHPOINT", "run_for_due_interns"]
+__all__ = ["MODEL_TOUCHPOINT", "ComplianceResult", "run_for_due_interns"]

@@ -8,12 +8,13 @@ transaction.
 from __future__ import annotations
 
 import logging
-from typing import Sequence
+from collections.abc import Sequence
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.modules.onboarding.models import Intern
 from app.modules.referral.models import Referral
 
 logger = logging.getLogger("nexhire.referral.repo")
@@ -30,14 +31,20 @@ async def list_for_referrer(
     *,
     referrer_id: UUID,
     limit: int = 50,
-) -> Sequence[Referral]:
+) -> Sequence[tuple[Referral, Intern | None]]:
+    """Return (referral, intern?) pairs for a referrer.
+
+    The intern row is None until HR approves the referral. Callers that
+    only need referral fields can ignore the second tuple element.
+    """
     rows = await session.execute(
-        select(Referral)
+        select(Referral, Intern)
+        .outerjoin(Intern, Intern.referral_id == Referral.id)
         .where(Referral.referrer_id == referrer_id)
         .order_by(Referral.created_at.desc())
         .limit(limit)
     )
-    return list(rows.scalars().all())
+    return [(r, i) for r, i in rows.all()]
 
 
 async def list_for_mentor(

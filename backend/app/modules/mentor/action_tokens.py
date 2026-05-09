@@ -23,8 +23,7 @@ import hashlib
 import logging
 import secrets
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
-from typing import Optional
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import select
@@ -49,7 +48,7 @@ def _hash_raw(raw: str) -> str:
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 @dataclass(frozen=True, slots=True)
@@ -96,7 +95,7 @@ async def validate(
     raw_token: str,
     expected_action: ActionTokenType,
     mark_used: bool = False,
-    ip_address: Optional[str] = None,
+    ip_address: str | None = None,
 ) -> ActionToken:
     """Look up + verify a token. Optionally mark it used.
 

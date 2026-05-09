@@ -1,15 +1,18 @@
 import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
+import { Loader2, ShieldAlert } from "lucide-react";
 
 import { NexHireApiError } from "@/lib/axios";
 import { redeemMagicLink } from "@/modules/candidate/api";
+import {
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+} from "@/shared/components/ui";
 
 /**
  * `/candidate/access?token=…` — magic-link landing.
- *
- * Redeems the token (single-use), stores the candidate JWT in memory
- * via the axios interceptor, and redirects per F-03 step 5 (status →
- * page mapping).
  */
 export function CandidateAccessPage() {
   const [params] = useSearchParams();
@@ -44,21 +47,27 @@ export function CandidateAccessPage() {
 
   return (
     <div className="flex min-h-screen items-center justify-center bg-background px-4">
-      <div className="w-full max-w-md rounded-xl border border-border bg-card p-8 shadow-sm">
-        <h1 className="text-xl font-semibold">Welcome to NexHire</h1>
-        {error === null ? (
-          <p className="mt-3 text-sm text-muted-foreground">
-            Verifying your access link…
-          </p>
-        ) : (
-          <p
-            role="alert"
-            className="mt-3 rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive"
-          >
-            {error}
-          </p>
-        )}
-      </div>
+      <Card className="w-full max-w-md">
+        <CardHeader>
+          <CardTitle className="text-xl">Welcome to NexHire</CardTitle>
+        </CardHeader>
+        <CardContent>
+          {error === null ? (
+            <p className="flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+              Verifying your access link…
+            </p>
+          ) : (
+            <p
+              role="alert"
+              className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+            >
+              <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+              {error}
+            </p>
+          )}
+        </CardContent>
+      </Card>
     </div>
   );
 }

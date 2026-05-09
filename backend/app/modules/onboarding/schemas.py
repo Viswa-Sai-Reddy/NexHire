@@ -5,7 +5,7 @@ from datetime import date, datetime
 from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, Field
 
 
 class CandidateRedeemRequest(BaseModel):
@@ -59,7 +59,7 @@ class IdDocExtractResponse(BaseModel):
 
 
 class JoiningFormSubmitResponse(BaseModel):
-    decision: str  # AUTO_LOCK | ROUTED_TO_HR
+    decision: str  # AUTO_LOCK (auto-lock engine no longer routes to HR)
     high_flags: list[str] = Field(default_factory=list)
     low_flags: list[str] = Field(default_factory=list)
     next_redirect: str

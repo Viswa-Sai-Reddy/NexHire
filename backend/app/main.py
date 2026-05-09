@@ -14,17 +14,20 @@ Slices S1+ append their routers here as the app grows.
 from __future__ import annotations
 
 import logging
+from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import AsyncIterator
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import Settings, get_settings
 from app.infrastructure import azure_keyvault, redis_client
 from app.infrastructure.database import (
     dispose_engine,
-    healthcheck as db_health,
     init_engine,
+)
+from app.infrastructure.database import (
+    healthcheck as db_health,
 )
 from app.infrastructure.event_bus import get_bus
 from app.infrastructure.redis_client import healthcheck as redis_health
@@ -35,14 +38,14 @@ from app.infrastructure.scheduler import (
 )
 from app.middleware.error_handler import register_error_handlers
 from app.middleware.logging import RequestIdMiddleware, configure_logging
-from app.modules.auth.router import auth_router, jwks_router
-from app.modules.mentor.picker_router import picker_router as mentor_picker_router
-from app.modules.mentor.router import router as mentor_action_router
 from app.modules.access.router import access_router
 from app.modules.admin.router import admin_router
+from app.modules.auth.router import auth_router, jwks_router
 from app.modules.lifecycle.router import lifecycle_router
+from app.modules.mentor.picker_router import picker_router as mentor_picker_router
+from app.modules.mentor.router import router as mentor_action_router
 from app.modules.nda.webhook_router import webhook_router as opensign_webhook_router
-from app.modules.onboarding.router import candidate_router
+from app.modules.onboarding.router import candidate_router, hr_onboarding_router
 from app.modules.referral.college_router import college_router
 from app.modules.referral.hr_router import hr_router
 from app.modules.referral.router import referral_router
@@ -68,11 +71,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # Register scheduled background jobs before the scheduler starts.
     from app.infrastructure import outbox_worker
-    from app.modules.ai import compliance_job
+    from app.modules.ai import bottleneck_job, compliance_job
     from app.modules.mentor import timeout_job as mentor_timeout_job
     from app.modules.nda import timeout_job as nda_timeout_job
-
-    from app.modules.ai import bottleneck_job
     from app.modules.referral import cooling_reminder_job
     from app.modules.workflow import sla_breach_job
 
@@ -107,6 +108,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
 
     # Order matters: outermost first.
+    # CORS handles browser preflight OPTIONS calls from the SPA.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=[cfg.frontend_base_url],
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+        expose_headers=["X-Request-Id"],
+    )
     app.add_middleware(RequestIdMiddleware)
 
     register_error_handlers(app)
@@ -119,6 +129,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(referral_router, prefix=api_prefix)
     app.include_router(hr_router, prefix=api_prefix)
     app.include_router(candidate_router, prefix=api_prefix)
+    app.include_router(hr_onboarding_router, prefix=api_prefix)
     app.include_router(access_router, prefix=api_prefix)
     app.include_router(lifecycle_router, prefix=api_prefix)
     app.include_router(admin_router, prefix=api_prefix)

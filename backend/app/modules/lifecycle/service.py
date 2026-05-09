@@ -13,7 +13,8 @@ Operations:
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta, timezone
+from dataclasses import dataclass
+from datetime import UTC, date, datetime
 from typing import Any
 from uuid import UUID
 
@@ -30,9 +31,10 @@ from app.modules.referral.models import (
     ReferralStageHistory,
 )
 from app.shared.constants import (
-    AdAccountStatus,
     EXTENSION_MAX_COUNT,
     EXTENSION_MAX_DAYS,
+    TERMINAL_REFERRAL_STATUSES,
+    AdAccountStatus,
     InternStatus,
     ReferralStatus,
     UserRole,
@@ -47,13 +49,12 @@ from app.shared.exceptions import (
     InvalidExtensionDurationError,
     InvalidStateTransitionError,
 )
-from dataclasses import dataclass
 
 logger = logging.getLogger("nexhire.lifecycle.service")
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -82,12 +83,92 @@ class ClosurePending(DomainEvent):
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
+class InternshipClosed(DomainEvent):
+    """Final terminal-CLOSED state. Emitted after AI-8 auto-sends the
+    certificate. Notification module subscribes to email the candidate
+    with their certificate.
+    """
+
+    intern_id: UUID
+    referral_id: UUID
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
 class InternshipTerminated(DomainEvent):
     intern_id: UUID
     referral_id: UUID
     initiated_by_user_id: UUID
     initiated_by_role: str
     reason: str
+
+
+# ────────────────────────────────────────────────────────────────────
+# List the mentor's interns (S18 workspace).
+# ────────────────────────────────────────────────────────────────────
+async def list_for_mentor(
+    session: AsyncSession,
+    *,
+    mentor_user_id: UUID,
+) -> list[tuple[Intern | None, Referral, int | None, list[str]]]:
+    """Return every referral the mentor is assigned to, including ones
+    that haven't yet reached the APPROVED stage (no Intern row yet),
+    plus the AI-3 risk score and AI-1 red flags so the dashboard can
+    show context next to the Accept/Reject buttons.
+
+    Each tuple is `(intern_or_None, referral, risk_score_or_None, red_flags)`.
+    """
+    from app.modules.referral.models import AiParseResult, RiskProfile
+
+    referral_rows = (
+        await session.execute(
+            select(Referral, Intern)
+            .outerjoin(Intern, Intern.referral_id == Referral.id)
+            .where(Referral.mentor_id == mentor_user_id)
+            .order_by(Referral.created_at.desc())
+        )
+    ).all()
+    if not referral_rows:
+        return []
+
+    referral_ids = [r.id for r, _ in referral_rows]
+
+    risk_rows = (
+        await session.execute(
+            select(RiskProfile.referral_id, RiskProfile.risk_score).where(
+                RiskProfile.referral_id.in_(referral_ids)
+            )
+        )
+    ).all()
+    risk_by_referral: dict[UUID, int] = {rid: score for rid, score in risk_rows}
+
+    # AI-1 resume parse stores red_flags inside the raw_output JSONB.
+    parse_rows = (
+        await session.execute(
+            select(AiParseResult.referral_id, AiParseResult.raw_output)
+            .where(
+                AiParseResult.referral_id.in_(referral_ids),
+                AiParseResult.ai_touchpoint == "RESUME_PARSE",
+            )
+            .order_by(AiParseResult.parsed_at.desc())
+        )
+    ).all()
+    flags_by_referral: dict[UUID, list[str]] = {}
+    for rid, raw in parse_rows:
+        if rid in flags_by_referral:
+            continue  # keep newest only
+        flags = raw.get("red_flags") if isinstance(raw, dict) else None
+        if isinstance(flags, list):
+            flags_by_referral[rid] = [str(f) for f in flags]
+
+    return [
+        (
+            intern,
+            referral,
+            risk_by_referral.get(referral.id),
+            flags_by_referral.get(referral.id, []),
+        )
+        for referral, intern in referral_rows
+    ]
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -128,7 +209,7 @@ async def confirm_start(
             await graph_client.set_account_enabled(
                 aad_object_id=intern.ad_account_username, enabled=True
             )
-        except Exception:  # noqa: BLE001 — graph errors don't block start
+        except Exception:
             logger.warning("nexhire.lifecycle.ad_enable_failed")
 
     intern.actual_start_date = today
@@ -280,10 +361,10 @@ async def confirm_completion(
     ).scalar_one()
     if referral.mentor_id != mentor_user_id:
         raise InsufficientPermissionsError()
-    if referral.status not in (
-        ReferralStatus.ACTIVE.value,
-        ReferralStatus.EXTENDED.value,
-    ):
+    # Mentor can mark complete from any non-terminal in-progress state
+    # (decision: eliminate manual-handoff stages — the AI-8 cert + cooling
+    # apply identically regardless of where the closure was triggered).
+    if ReferralStatus(referral.status) in TERMINAL_REFERRAL_STATUSES:
         raise InternshipNotActiveError()
 
     # Validate the structured shape (A19).
@@ -350,7 +431,7 @@ async def confirm_completion(
                 aad_object_id=intern.ad_account_username, enabled=False
             )
             intern.ad_account_status = AdAccountStatus.DISABLED.value
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.warning("nexhire.lifecycle.ad_disable_failed")
 
     return intern
@@ -382,13 +463,16 @@ async def terminate(
             select(Referral).where(Referral.id == intern.referral_id)
         )
     ).scalar_one()
-    if referral.status not in (
-        ReferralStatus.ACTIVE.value,
-        ReferralStatus.EXTENDED.value,
-    ):
+    # Termination is allowed from any non-terminal state. Mentor / HR /
+    # candidate can pull the plug at any stage of onboarding or active
+    # internship; only re-terminating an already-terminal referral is
+    # blocked (idempotency + audit clarity).
+    if ReferralStatus(referral.status) in TERMINAL_REFERRAL_STATUSES:
         raise InvalidStateTransitionError(
             current_status=referral.status, attempted_action="TERMINATE"
         )
+
+    previous_status = referral.status
 
     intern.status = InternStatus.TERMINATED.value
     intern.actual_end_date = intern.actual_end_date or date.today()
@@ -404,7 +488,7 @@ async def terminate(
     session.add(
         ReferralStageHistory(
             referral_id=referral.id,
-            from_status=referral.status,
+            from_status=previous_status,
             to_status=ReferralStatus.TERMINATED.value,
             actor_id=actor_user_id,
             actor_role=actor_role.value,
@@ -445,7 +529,7 @@ async def terminate(
                 aad_object_id=intern.ad_account_username, enabled=False
             )
             intern.ad_account_status = AdAccountStatus.DISABLED.value
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.warning("nexhire.lifecycle.ad_disable_failed")
 
     return intern

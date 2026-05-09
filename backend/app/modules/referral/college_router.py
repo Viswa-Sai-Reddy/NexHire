@@ -20,7 +20,6 @@ from app.modules.referral import college_repository
 from app.modules.referral.schemas import CollegeSearchResult
 from app.shared.exceptions import BusinessRuleError
 
-
 college_router = APIRouter(prefix="/colleges", tags=["colleges"])
 
 

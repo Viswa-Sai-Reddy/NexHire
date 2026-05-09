@@ -1,7 +1,7 @@
 """NDA lifecycle — issue, sign, decline, auto-reject."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
@@ -17,7 +17,6 @@ from app.shared.constants import (
     ReferralStatus,
 )
 from tests.factories import future_dates, make_college, make_user, random_pan
-
 
 pytestmark = pytest.mark.asyncio
 
@@ -79,7 +78,7 @@ class TestSign:
         await nda_service.mark_signed(
             session,
             envelope_id=record.opensign_envelope_id or "",
-            signed_at=datetime.now(timezone.utc),
+            signed_at=datetime.now(UTC),
         )
         await session.refresh(referral)
         assert referral.status == ReferralStatus.NDA_SIGNED.value
@@ -94,7 +93,7 @@ class TestDecline:
         await nda_service.mark_declined(
             session,
             envelope_id=record.opensign_envelope_id or "",
-            declined_at=datetime.now(timezone.utc),
+            declined_at=datetime.now(UTC),
         )
         await session.refresh(referral)
         assert referral.status == ReferralStatus.NDA_DECLINED_REJECTED.value
@@ -107,7 +106,7 @@ class TestAutoReject:
         intern, referral = await _intern_at_id_issued(session)
         record = await nda_service.issue_for_intern(session, intern_id=intern.id)
         # Backdate `sent_at` past the deadline.
-        record.sent_at = datetime.now(timezone.utc) - timedelta(days=6)
+        record.sent_at = datetime.now(UTC) - timedelta(days=6)
         await session.flush()
 
         handled = await nda_service.auto_reject_expired(session)

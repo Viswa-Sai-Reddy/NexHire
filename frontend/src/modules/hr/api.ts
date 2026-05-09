@@ -1,6 +1,8 @@
 import { api } from "@/lib/axios";
 import type { ReferralSummary } from "@/modules/referral/types";
 import type {
+  HrInternsParams,
+  HrInternsResponse,
   HrQueueResponse,
   HrReviewContext,
   RecentAiActionsResponse,
@@ -68,5 +70,14 @@ export async function recallAutoApprove(
     `/referrals/hr/${referralId}/recall`,
     { reason },
   );
+  return data;
+}
+
+export async function getAllInterns(
+  params: HrInternsParams = {},
+): Promise<HrInternsResponse> {
+  const { data } = await api.get<HrInternsResponse>("/referrals/hr/interns", {
+    params,
+  });
   return data;
 }

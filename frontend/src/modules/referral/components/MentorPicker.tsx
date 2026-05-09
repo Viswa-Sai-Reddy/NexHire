@@ -99,7 +99,7 @@ function AiSuggestions({
   }
   if (query.data.suggestions.length === 0) {
     return (
-      <p className="rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-900">
+      <p className="rounded-md border border-stage-review/30 bg-stage-review/10 px-3 py-2 text-sm text-stage-review">
         No mentors with capacity right now. Try the "Browse all" view, or
         contact HR.
       </p>
@@ -292,7 +292,7 @@ function MentorCard({
         <p
           className={cn(
             "text-xs font-medium",
-            mentor.available ? "text-emerald-600" : "text-destructive",
+            mentor.available ? "text-stage-active" : "text-destructive",
           )}
         >
           {mentor.active_mentees} / {mentor.threshold} mentees

@@ -29,7 +29,6 @@ from app.modules.mentor.schemas import MentorActionConfirmRequest, MentorActionR
 from app.shared.constants import ActionTokenType
 from app.shared.exceptions import MentorRejectionReasonMissingError
 
-
 router = APIRouter(prefix="/action/mentor", tags=["mentor-action"])
 logger = logging.getLogger("nexhire.router.mentor")
 

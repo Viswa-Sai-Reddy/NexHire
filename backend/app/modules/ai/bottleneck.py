@@ -13,7 +13,7 @@ referral so the executive dashboard (S23) can read at-risk counts.
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from typing import NamedTuple
 from uuid import UUID
 
@@ -46,7 +46,7 @@ async def predict_for_active_referrals(
     today: date | None = None,
 ) -> list[BottleneckPrediction]:
     today = today or date.today()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # Pull stats once.
     stats_rows = (
@@ -152,7 +152,7 @@ async def _has_upcoming_holiday(
     return row.first() is not None
 
 
-__all__ = ["BottleneckPrediction", "MODEL_TOUCHPOINT", "predict_for_active_referrals"]
+__all__ = ["MODEL_TOUCHPOINT", "BottleneckPrediction", "predict_for_active_referrals"]
 
 
 # Suppress unused-import warning when loaded standalone.

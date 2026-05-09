@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 import { useCollegeSearch } from "@/modules/referral/hooks";
 import type { CollegeSearchResult } from "@/modules/referral/types";
@@ -6,6 +6,7 @@ import type { CollegeSearchResult } from "@/modules/referral/types";
 interface Props {
   value: CollegeSearchResult | null;
   onChange: (selection: CollegeSearchResult | null) => void;
+  placeholder?: string;
 }
 
 /**
@@ -13,10 +14,27 @@ interface Props {
  * use shadcn's Combobox primitive yet (that ships when the rest of
  * shadcn primitives are scaffolded in S2). Sufficient for S1 demo.
  */
-export function CollegeCombobox({ value, onChange }: Props) {
+export function CollegeCombobox({
+  value,
+  onChange,
+  placeholder = "Type college name (e.g. VIT)",
+}: Props) {
   const [query, setQuery] = useState(value?.canonical_name ?? "");
   const [open, setOpen] = useState(false);
   const search = useCollegeSearch(query);
+
+  // When `value` is set from outside (e.g. AI resume parser auto-selects
+  // a college) sync the visible text to the canonical name. Without this
+  // the input stays empty while the form's `state.college` is set, which
+  // makes it look like nothing happened.
+  useEffect(() => {
+    if (value !== null && query !== value.canonical_name) {
+      setQuery(value.canonical_name);
+    }
+    // We intentionally only react to `value` changes; user typing is
+    // handled in the input's onChange.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [value]);
 
   const selectAndClose = (college: CollegeSearchResult) => {
     onChange(college);
@@ -41,14 +59,14 @@ export function CollegeCombobox({ value, onChange }: Props) {
         }}
         onFocus={() => setOpen(true)}
         onBlur={() => window.setTimeout(() => setOpen(false), 100)}
-        placeholder="Type college name (e.g. VIT)"
-        className="w-full rounded-md border border-border bg-card px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary"
+        placeholder={placeholder}
+        className="flex h-9 w-full rounded-md border border-border bg-card px-3 py-2 text-sm shadow-sm transition-colors placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
       />
       {open && query.trim().length > 0 && (
         <ul
           id="college-suggestions"
           role="listbox"
-          className="absolute z-10 mt-1 max-h-60 w-full overflow-auto rounded-md border border-border bg-card shadow-md"
+          className="absolute z-10 mt-1 max-h-60 w-full overflow-auto rounded-md border border-border bg-popover text-popover-foreground shadow-lg"
         >
           {search.isLoading && (
             <li className="px-3 py-2 text-sm text-muted-foreground">Searching…</li>

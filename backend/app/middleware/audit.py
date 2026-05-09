@@ -25,7 +25,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -107,9 +107,9 @@ async def _persist(
                 event_timestamp, payload,
                 prev_checksum, checksum
             ) VALUES (
-                :event_type, :entity_type, :entity_id,
-                :actor_user_id, :actor_role,
-                :ip_address, :user_agent,
+                :event_type, :entity_type, CAST(:entity_id AS uuid),
+                CAST(:actor_user_id AS uuid), :actor_role,
+                CAST(:ip_address AS inet), :user_agent,
                 :event_timestamp, CAST(:payload AS jsonb),
                 :prev_checksum, :checksum
             )
@@ -123,7 +123,7 @@ async def _persist(
             actor_role=actor_role,
             ip_address=ip_address,
             user_agent=user_agent,
-            event_timestamp=datetime.now(timezone.utc),
+            event_timestamp=datetime.now(UTC),
             payload=canonical_payload,
             prev_checksum=prev_checksum,
             checksum=checksum,

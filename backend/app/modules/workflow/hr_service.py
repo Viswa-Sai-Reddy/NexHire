@@ -12,7 +12,7 @@ Each action runs inside the caller's transaction (router uses
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import select
@@ -48,7 +48,7 @@ logger = logging.getLogger("nexhire.workflow.hr")
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 async def _load(session: AsyncSession, referral_id: UUID) -> Referral:

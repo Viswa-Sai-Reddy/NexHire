@@ -1,7 +1,7 @@
 """CoolingPeriodService — apply, get_status, override (RULE-CP1..CP7)."""
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,7 +14,6 @@ from app.shared.exceptions import (
     OverrideReasonTooShortError,
 )
 from tests.factories import future_dates, make_college, make_user, random_pan
-
 
 pytestmark = pytest.mark.asyncio
 
@@ -172,7 +171,7 @@ class TestGetStatus:
         pan = random_pan()
         referral = await _persist_terminal_referral(session, pan=pan)
         # Pretend cooling was applied 10 days ago for 6 months.
-        start = datetime.now(timezone.utc) - timedelta(days=10)
+        start = datetime.now(UTC) - timedelta(days=10)
         end = start + timedelta(days=180)
         referral.cooling_period_months = 6
         referral.cooling_period_start_at = start

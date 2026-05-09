@@ -5,7 +5,8 @@ Operations the candidate portal calls:
   * `save_draft(intern_id, payload)` — auto-save every 60s. Optimistic
     locking via the `version` column.
   * `submit(intern_id)` — DRAFT/SUBMITTED → SUBMITTED; fires the
-    auto-lock engine which decides AUTO_LOCK or ROUTED_TO_HR.
+    auto-lock engine, which always auto-locks (flags are recorded for
+    audit / HR recall but no longer gate the transition).
 
 Operations HR calls (S13/S14):
   * `manual_lock(intern_id, hr_user_id)` — flagged path; HR locks after
@@ -15,7 +16,7 @@ Operations HR calls (S13/S14):
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 from uuid import UUID
 
@@ -24,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.infrastructure.event_bus import get_bus
 from app.middleware import audit
-from app.modules.onboarding import auto_lock, non_worker_id
+from app.modules.onboarding import auto_lock
 from app.modules.onboarding.models import Intern, JoiningForm
 from app.modules.referral.models import (
     Referral,
@@ -50,7 +51,7 @@ logger = logging.getLogger("nexhire.onboarding.service")
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 async def get_form(session: AsyncSession, *, intern_id: UUID) -> JoiningForm:
@@ -95,8 +96,8 @@ async def submit(
     *,
     intern_id: UUID,
 ) -> auto_lock.AutoLockResult:
-    """Candidate submits. Status → SUBMITTED, then auto-lock engine
-    decides AUTO_LOCK or ROUTED_TO_HR.
+    """Candidate submits. Status → SUBMITTED, then the auto-lock engine
+    always auto-locks (flags recorded for audit, no HR gate).
     """
     form = await get_form(session, intern_id=intern_id)
     if form.status == JoiningFormStatus.LOCKED.value:
@@ -228,43 +229,15 @@ async def manual_lock(
     return form
 
 
-# ────────────────────────────────────────────────────────────────────
-# F-34 trigger — JoiningFormLocked → auto-generate Non-Worker ID.
-# ────────────────────────────────────────────────────────────────────
-async def on_joining_form_locked(
-    event: auto_lock.JoiningFormLocked,
-) -> None:
-    from app.infrastructure.database import get_sessionmaker
-
-    factory = get_sessionmaker()
-    async with factory() as session, session.begin():
-        try:
-            await non_worker_id.generate_for_intern(
-                session, intern_id=event.intern_id
-            )
-        except Exception:
-            logger.exception(
-                "nexhire.onboarding.nw_id_failed",
-                extra={"intern_id": str(event.intern_id)},
-            )
-            raise
-
-        # Move referral to ID_ISSUED.
-        referral = (
-            await session.execute(
-                select(Referral).where(Referral.id == event.referral_id)
-            )
-        ).scalar_one()
-        referral.status = ReferralStatus.ID_ISSUED.value
-        referral.current_stage = ReferralStatus.ID_ISSUED.value
-        referral.stage_entered_at = _utcnow()
-        referral.updated_at = _utcnow()
+# NOTE: NW-ID generation used to live here as an event handler subscribed
+# to JoiningFormLocked. It now runs inline inside `auto_lock._auto_lock`
+# so it shares the lock's transaction — silent rollbacks no longer
+# leave a candidate locked without a Non-Worker ID.
 
 
 __all__ = [
     "get_form",
     "manual_lock",
-    "on_joining_form_locked",
     "save_draft",
     "submit",
 ]

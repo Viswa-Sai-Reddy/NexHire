@@ -30,15 +30,13 @@ class Settings(BaseSettings):
     database_pool_size: int = 10
     database_pool_overflow: int = 20
 
+    # ── Frontend base URL ──────────────────────────────────
+    # Used in transactional emails (action links, candidate portal links,
+    # OpenSign webhook URL). No trailing slash.
+    frontend_base_url: str = "http://localhost:5173"
+
     # ── Redis ──────────────────────────────────────────────
     redis_url: str = "redis://localhost:6379/0"
-
-    # ── Azure AD ───────────────────────────────────────────
-    azure_ad_tenant_id: str = ""
-    azure_ad_client_id: str = ""
-    azure_ad_client_secret: str = ""
-    azure_ad_authority: str = ""
-    azure_ad_redirect_uri: str = "http://localhost:5173/auth/callback"
 
     # ── JWT ────────────────────────────────────────────────
     jwt_private_key_pem: str = ""
@@ -53,7 +51,11 @@ class Settings(BaseSettings):
     azure_key_vault_url: str = ""
 
     # ── Azure Blob Storage ─────────────────────────────────
+    # When `azure_blob_account_key` is set, the Blob client uses shared-key
+    # auth (and SAS generation has the key it needs). When it's empty,
+    # auth falls back to DefaultAzureCredential (Managed Identity / az login).
     azure_blob_account_url: str = ""
+    azure_blob_account_key: str = ""
     azure_blob_container_documents: str = "documents"
     azure_blob_container_temp: str = "temp-uploads"
 
@@ -76,15 +78,33 @@ class Settings(BaseSettings):
     graph_client_id: str = ""
     graph_client_secret: str = ""
 
+    # ── AD provisioning mode ───────────────────────────────
+    # `graph` calls Microsoft Graph to create real Azure AD accounts.
+    # `postgres` records a synthetic `intern-<id>@nexhire.local` username
+    # in the `interns` row only — no Graph call attempted. Use `postgres`
+    # when interns don't need to log into corporate AD systems.
+    ad_provisioning_mode: Literal["graph", "postgres"] = "postgres"
+
     # ── Gmail ──────────────────────────────────────────────
+    # Two send paths supported:
+    #   * Service-account + domain-wide delegation (Workspace).
+    #   * SMTP with an App Password (personal Gmail). When `gmail_app_password`
+    #     is set, SMTP wins regardless of the service-account JSON path.
     gmail_service_account_json_path: str = ""
     gmail_sender_email: str = ""
     gmail_domain_delegated_user: str = ""
+    gmail_app_password: str = ""
 
     # ── OpenSign ───────────────────────────────────────────
     opensign_base_url: str = ""
     opensign_api_key: str = ""
     opensign_webhook_signing_secret: str = ""
+
+    # ── NDA template ──────────────────────────────────────
+    # Resolves in this order: local path → Blob (`templates/nda-<ver>.pdf`)
+    # → bundled placeholder. See `nda.service._load_nda_template`.
+    nda_template_local_path: str = ""
+    nda_template_version: str = "v1"
 
     # ── PAN encryption ─────────────────────────────────────
     pan_hmac_pepper: str = ""

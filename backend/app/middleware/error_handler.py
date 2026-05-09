@@ -27,7 +27,7 @@ Behaviour:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -42,15 +42,17 @@ from app.shared.exceptions import (
     BusinessRuleError,
     IntegrationError,
     NexHireBaseException,
-    SystemError as NexHireSystemError,
     ValidationError,
+)
+from app.shared.exceptions import (
+    SystemError as NexHireSystemError,
 )
 
 logger = logging.getLogger("nexhire.errors")
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _envelope(
@@ -153,7 +155,7 @@ def register_error_handlers(app: FastAPI) -> None:
             from app.middleware.audit import audit_business_rule_violation
 
             await audit_business_rule_violation(exc, path=request.url.path)
-        except Exception:  # noqa: BLE001 — audit is best-effort here
+        except Exception:
             logger.exception("nexhire.error.audit_publish_failed")
 
         return JSONResponse(

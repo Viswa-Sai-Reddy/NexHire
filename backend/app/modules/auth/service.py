@@ -1,20 +1,20 @@
-"""Auth service — exchanges an Azure AD ID token for a NexHire JWT.
+"""Auth service — email + password login and self-serve registration.
 
-S0 path:
-  1. Validate the incoming Azure AD ID token (azure_ad.validate_id_token).
-  2. `oid` claim → look up `users.azure_oid`. If missing, create the
-     user with `role=NULL`-ish state until an admin assigns a real role.
-     For the bootstrap user (the seeded Program Owner) the role is set
-     by the seed migration so they can log in immediately.
-  3. Issue NexHire access + refresh tokens.
-  4. Persist the refresh-token hash to `sessions`.
-  5. Audit `LOGIN`. Publish `UserLoggedIn` event for any subscriber.
+Flow:
+  1. `login_with_email_password` — look up user by email, bcrypt-verify
+     password, issue NexHire access + refresh tokens.
+  2. `register_user` — create a new user row with bcrypt-hashed password
+     and immediately issue tokens (auto-login).
+  3. `refresh_session` — rotate a refresh token for new access + refresh.
+  4. `logout` — revoke a refresh token (or all sessions).
+
+Audit + domain events fire on the same boundaries as before; the only
+field that's gone is `azure_oid` since we no longer go through AAD.
 """
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
-from typing import Any
+from datetime import UTC, datetime
 from uuid import UUID
 
 import bcrypt
@@ -22,12 +22,14 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.middleware import audit
-from app.modules.auth import azure_ad, jwt_service
-from app.modules.auth.models import Session as SessionRow, User
-from app.modules.auth.schemas import TokenResponse
+from app.modules.auth import jwt_service
+from app.modules.auth.models import Session as SessionRow
+from app.modules.auth.models import User
+from app.modules.auth.schemas import RegisterRequest, TokenResponse
 from app.shared.constants import UserRole
 from app.shared.domain_events import UserCreated, UserLoggedIn
 from app.shared.exceptions import (
+    BusinessRuleError,
     InsufficientPermissionsError,
     SsoTokenInvalidError,
 )
@@ -44,28 +46,107 @@ def _verify_refresh(token: str, hashed: str) -> bool:
     return bcrypt.checkpw(token.encode("utf-8"), hashed.encode("utf-8"))
 
 
-async def login_with_azure_id_token(
+def _hash_password(plain: str) -> str:
+    return bcrypt.hashpw(plain.encode("utf-8"), bcrypt.gensalt()).decode("ascii")
+
+
+def _verify_password(plain: str, hashed: str) -> bool:
+    if not hashed:
+        return False
+    return bcrypt.checkpw(plain.encode("utf-8"), hashed.encode("utf-8"))
+
+
+async def login_with_email_password(
     *,
     session: AsyncSession,
-    id_token: str,
+    email: str,
+    password: str,
     ip_address: str | None = None,
     user_agent: str | None = None,
 ) -> TokenResponse:
-    claims = await azure_ad.validate_id_token(id_token)
-    azure_oid = str(claims.get("oid") or claims.get("sub") or "")
-    email_raw = str(claims.get("preferred_username") or claims.get("email") or "").lower()
-    name = str(claims.get("name") or email_raw or "Unknown")
-    if not azure_oid or not email_raw:
-        raise SsoTokenInvalidError(user_message="ID token is missing required claims.")
+    """Validate email + password, issue NexHire tokens.
 
-    user, created = await _get_or_create_user(
-        session, azure_oid=azure_oid, email=email_raw, name=name
+    All failure modes return the same generic error to avoid leaking
+    whether the email exists or just the password is wrong.
+    """
+    normalized_email = email.strip().lower()
+
+    user = (
+        await session.execute(select(User).where(User.email == normalized_email))
+    ).scalar_one_or_none()
+
+    if user is None or not user.is_active or not user.role:
+        raise SsoTokenInvalidError(user_message="Invalid email or password.")
+    if not _verify_password(password, user.password_hash):
+        raise SsoTokenInvalidError(user_message="Invalid email or password.")
+
+    return await _issue_tokens(
+        session=session,
+        user=user,
+        ip_address=ip_address,
+        user_agent=user_agent,
+        is_new=False,
     )
 
+
+async def register_user(
+    *,
+    session: AsyncSession,
+    payload: RegisterRequest,
+    ip_address: str | None = None,
+    user_agent: str | None = None,
+) -> TokenResponse:
+    """Self-serve user creation. Returns tokens so the caller is
+    immediately logged in.
+
+    For demo / hackathon use. Production hardening would gate the role
+    selection and require email verification.
+    """
+    normalized_email = payload.email.strip().lower()
+
+    existing = (
+        await session.execute(select(User).where(User.email == normalized_email))
+    ).scalar_one_or_none()
+    if existing is not None:
+        raise BusinessRuleError(
+            user_message="An account with that email already exists.",
+            details={"email": normalized_email},
+        )
+
+    role = UserRole(payload.role)  # validated by schema; convert to enum string
+    user = User(
+        email=normalized_email,
+        full_name=payload.full_name.strip(),
+        role=role.value,
+        password_hash=_hash_password(payload.password),
+        # Mentor role implies mentor-eligibility — saves a separate admin
+        # toggle for demo accounts.
+        can_mentor=(role is UserRole.MENTOR),
+        is_active=True,
+    )
+    session.add(user)
+    await session.flush()  # populate user.id
+
+    return await _issue_tokens(
+        session=session,
+        user=user,
+        ip_address=ip_address,
+        user_agent=user_agent,
+        is_new=True,
+    )
+
+
+async def _issue_tokens(
+    *,
+    session: AsyncSession,
+    user: User,
+    ip_address: str | None,
+    user_agent: str | None,
+    is_new: bool,
+) -> TokenResponse:
     if not user.is_active:
         raise InsufficientPermissionsError(user_message="This account is deactivated.")
     if not user.role:
-        # Bootstrapped users always have a role; this catches inconsistent state.
         raise InsufficientPermissionsError(
             user_message=(
                 "Your account has no role assigned. "
@@ -92,28 +173,27 @@ async def login_with_azure_id_token(
     )
 
     await audit.publish(
-        event_type="USER_CREATED" if created else "LOGIN",
+        event_type="USER_CREATED" if is_new else "LOGIN",
         entity_type="USER",
         entity_id=user.id,
         actor_user_id=user.id,
         actor_role=user.role,
         ip_address=ip_address,
         user_agent=user_agent,
-        payload={"email": user.email, "azure_oid": azure_oid},
+        payload={"email": user.email},
         session=session,
     )
 
-    # Domain events fire after the audit (audit is the source of truth).
     from app.infrastructure.event_bus import get_bus
 
     bus = get_bus()
-    if created:
+    if is_new:
         await bus.publish(
             UserCreated(
                 user_id=UserId(user.id),
                 email=user.email,
                 role=user.role,
-                azure_oid=azure_oid,
+                azure_oid=None,
             )
         )
     await bus.publish(
@@ -127,52 +207,6 @@ async def login_with_azure_id_token(
     )
 
 
-async def _get_or_create_user(
-    session: AsyncSession,
-    *,
-    azure_oid: str,
-    email: str,
-    name: str,
-) -> tuple[User, bool]:
-    """Find by azure_oid; if missing, find by email; if still missing,
-    create the row.
-
-    The "find by email" fallback handles the case where the seeded PO
-    row was created before the user logged in for the first time and
-    hence has `azure_oid IS NULL`. On first login we backfill the OID.
-    """
-    user = (
-        await session.execute(select(User).where(User.azure_oid == azure_oid))
-    ).scalar_one_or_none()
-    if user:
-        return user, False
-
-    user = (
-        await session.execute(select(User).where(User.email == email))
-    ).scalar_one_or_none()
-    if user:
-        # Backfill OID + name; preserve role.
-        user.azure_oid = azure_oid
-        user.full_name = name
-        user.updated_at = datetime.now(timezone.utc)
-        return user, False
-
-    # Truly new — minimal record. The role MUST be set by an admin
-    # before the user can use the app. Login responses for these users
-    # surface INSUFFICIENT_PERMISSIONS until that happens (see caller).
-    user = User(
-        azure_oid=azure_oid,
-        email=email,
-        full_name=name,
-        role="",  # placeholder — caller will reject login until set
-        can_mentor=False,
-        is_active=True,
-    )
-    session.add(user)
-    await session.flush()  # assign user.id without committing the outer txn
-    return user, True
-
-
 async def refresh_session(
     *,
     session: AsyncSession,
@@ -183,7 +217,7 @@ async def refresh_session(
         await session.execute(
             select(SessionRow).where(
                 SessionRow.revoked_at.is_(None),
-                SessionRow.expires_at > datetime.now(timezone.utc),
+                SessionRow.expires_at > datetime.now(UTC),
             )
         )
     ).scalars().all()
@@ -208,7 +242,7 @@ async def refresh_session(
     )
     new_refresh, new_exp = jwt_service.issue_refresh_token()
 
-    matched.revoked_at = datetime.now(timezone.utc)
+    matched.revoked_at = datetime.now(UTC)
     session.add(
         SessionRow(
             user_id=user.id,
@@ -242,7 +276,7 @@ async def logout(
             )
         )
     ).scalars().all()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     for row in rows:
         if raw_refresh_token is None or _verify_refresh(
             raw_refresh_token, row.refresh_token_hash
@@ -250,22 +284,10 @@ async def logout(
             row.revoked_at = now
 
 
-def claims_payload(claims: dict[str, Any]) -> dict[str, Any]:
-    """Minimal helper for tests — turns Azure AD claims into the user
-    fields we'd expect to persist. Not part of the public API.
-    """
-    return {
-        "azure_oid": claims.get("oid") or claims.get("sub"),
-        "email": (claims.get("preferred_username") or claims.get("email") or "").lower(),
-        "name": claims.get("name"),
-    }
-
-
-# Re-exports for convenience.
 __all__ = [
-    "claims_payload",
-    "login_with_azure_id_token",
+    "UserRole",
+    "login_with_email_password",
     "logout",
     "refresh_session",
-    "UserRole",
+    "register_user",
 ]

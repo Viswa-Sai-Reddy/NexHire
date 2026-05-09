@@ -1,7 +1,7 @@
 """Read-side aggregations for S23 (Executive) and S24 (Audit/SLA)."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from sqlalchemy import text
@@ -67,7 +67,7 @@ async def executive_overview(session: AsyncSession) -> dict[str, Any]:
 async def audit_recent(
     session: AsyncSession, *, limit: int = 100, since_hours: int = 168
 ) -> list[dict[str, Any]]:
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=since_hours)
+    cutoff = datetime.now(UTC) - timedelta(hours=since_hours)
     rows = (
         await session.execute(
             text(

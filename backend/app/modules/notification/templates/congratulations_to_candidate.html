@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block content %}
+  <h1 style="margin:0 0 16px;font-size:24px;font-weight:600;line-height:1.2;color:#0f172a;">
+    Welcome to NexHire, {{ candidate_name }}!
+  </h1>
+  <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">
+    Your joining form is locked, your NDA is signed, and your internship
+    is officially confirmed. Here's what you need to know.
+  </p>
+
+  <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:16px 0 24px;width:100%;border:1px solid #e2e8f0;border-radius:8px;background:#f8fafc;">
+    <tr>
+      <td style="padding:18px 20px;font-size:14px;color:#0f172a;">
+        <div style="color:#64748b;font-size:12px;letter-spacing:0.06em;text-transform:uppercase;margin-bottom:6px;">
+          Your Non-Worker ID
+        </div>
+        <div style="font-size:22px;font-weight:600;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#0f172a;">
+          {{ non_worker_id }}
+        </div>
+        <div style="color:#64748b;font-size:13px;margin-top:8px;">
+          You'll need this ID when collecting your badge and for any HR
+          correspondence during the internship.
+        </div>
+      </td>
+    </tr>
+  </table>
+
+  <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:0 0 24px;width:100%;border:1px solid #e2e8f0;border-radius:8px;">
+    <tr>
+      <td style="padding:14px 16px;font-size:14px;color:#0f172a;">
+        <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+          <tr>
+            <td style="padding:4px 0;color:#64748b;">Project</td>
+            <td style="padding:4px 0;text-align:right;">{{ project_title }}</td>
+          </tr>
+          <tr>
+            <td style="padding:4px 0;color:#64748b;">Location</td>
+            <td style="padding:4px 0;text-align:right;">{{ joining_location }}</td>
+          </tr>
+          <tr>
+            <td style="padding:4px 0;color:#64748b;">Start date</td>
+            <td style="padding:4px 0;text-align:right;">{{ start_date }}</td>
+          </tr>
+          <tr>
+            <td style="padding:4px 0;color:#64748b;">End date</td>
+            <td style="padding:4px 0;text-align:right;">{{ end_date }}</td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+
+  <h2 style="margin:24px 0 8px;font-size:16px;font-weight:600;color:#0f172a;">
+    What happens next
+  </h2>
+  <ul style="margin:0 0 16px 18px;padding:0;font-size:14px;line-height:1.6;color:#334155;">
+    <li>HR / IT will provision your AD account and badge access.</li>
+    <li>Your mentor will reach out about your start-day plan.</li>
+    <li>You can track your status at any time from the candidate portal.</li>
+  </ul>
+
+  {% if portal_url %}
+    <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:24px 0;">
+      <tr>
+        <td>
+          <a href="{{ portal_url }}"
+             style="display:inline-block;background:#10b981;color:#ffffff;text-decoration:none;padding:12px 22px;border-radius:8px;font-size:14px;font-weight:500;">
+            Open candidate portal
+          </a>
+        </td>
+      </tr>
+    </table>
+  {% endif %}
+{% endblock %}
+
+{% block footer %}
+  <br />
+  Questions? Reply to this email and HR will get back to you.
+{% endblock %}

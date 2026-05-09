@@ -22,12 +22,15 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import AsyncIterator, Awaitable, Callable
+from contextvars import ContextVar
 from typing import Any, TypeVar
 
 from sqlalchemy.exc import (
     DBAPIError,
     IntegrityError,
     OperationalError,
+)
+from sqlalchemy.exc import (
     TimeoutError as SaTimeoutError,
 )
 from sqlalchemy.ext.asyncio import (
@@ -46,7 +49,7 @@ logger = logging.getLogger("nexhire.db")
 T = TypeVar("T")
 
 
-class Base(MappedAsDataclass, DeclarativeBase):
+class Base(MappedAsDataclass, DeclarativeBase, kw_only=True):
     """SQLAlchemy declarative base.
 
     `MappedAsDataclass` gives every ORM model dataclass-style ergonomics
@@ -57,6 +60,11 @@ class Base(MappedAsDataclass, DeclarativeBase):
             __tablename__ = "users"
             id: Mapped[UUID] = mapped_column(primary_key=True, ...)
             email: Mapped[str] = mapped_column(...)
+
+    `kw_only=True` makes every generated `__init__` parameter keyword-only,
+    which sidesteps the dataclass "non-default argument follows default"
+    rule that bites when a model mixes `default_factory=uuid4` PKs with
+    plain non-defaulted columns. All callers pass kwargs anyway.
     """
 
 
@@ -123,6 +131,23 @@ async def dispose_engine() -> None:
 
 
 # ────────────────────────────────────────────────────────────────────
+# Per-request session contextvar.
+# Producers can stash deferred work (e.g. domain events to publish only
+# after the request transaction commits) on `session.info`. The bus
+# checks this contextvar via `current_request_session()` to decide
+# whether to defer or publish immediately.
+# ────────────────────────────────────────────────────────────────────
+_current_request_session: ContextVar[AsyncSession | None] = ContextVar(
+    "_current_request_session", default=None
+)
+
+
+def current_request_session() -> AsyncSession | None:
+    """Return the session bound to the current FastAPI request, if any."""
+    return _current_request_session.get()
+
+
+# ────────────────────────────────────────────────────────────────────
 # FastAPI dependency.
 # ────────────────────────────────────────────────────────────────────
 async def get_session() -> AsyncIterator[AsyncSession]:
@@ -133,17 +158,53 @@ async def get_session() -> AsyncIterator[AsyncSession]:
             ...
 
     On clean return: commits. On exception: rolls back. Always closes.
+    Drains any deferred-after-commit work (e.g. queued domain events)
+    after a successful commit.
     """
     factory = get_sessionmaker()
     async with factory() as session:
+        token = _current_request_session.set(session)
         try:
             yield session
             await session.commit()
+            # Drain deferred work AFTER the producer's commit so handlers
+            # that open their own session can see committed rows.
+            await _run_after_commit_callbacks(session)
         except Exception:
             await session.rollback()
             raise
         finally:
+            _current_request_session.reset(token)
             await session.close()
+
+
+async def _run_after_commit_callbacks(session: AsyncSession) -> None:
+    """Invoke any callables stashed on `session.info["after_commit"]`.
+
+    Drains repeatedly: handlers can publish further events that the bus
+    re-defers onto the same list (because the request context-var is
+    still set during the drain). Loop until no new callbacks appear.
+
+    Failures are logged but do not propagate — at this point the user's
+    request has already succeeded; we don't want a flaky email handler
+    to flip a 201 into a 500.
+    """
+    safety_limit = 32  # depth-cap to prevent infinite republishing.
+    for _ in range(safety_limit):
+        callbacks: list[Callable[[], Awaitable[None]]] = list(
+            session.info.pop("after_commit", []) or []
+        )
+        if not callbacks:
+            return
+        for cb in callbacks:
+            try:
+                await cb()
+            except Exception:
+                logger.exception("nexhire.db.after_commit_failed")
+    logger.warning(
+        "nexhire.db.after_commit_drain_capped",
+        extra={"safety_limit": safety_limit},
+    )
 
 
 # ────────────────────────────────────────────────────────────────────

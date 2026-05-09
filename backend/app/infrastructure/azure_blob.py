@@ -8,7 +8,7 @@ policy hooks).
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from functools import lru_cache
 from typing import TYPE_CHECKING
 from uuid import uuid4
@@ -17,26 +17,30 @@ from app.config import get_settings
 from app.shared.exceptions import AzureBlobError
 
 if TYPE_CHECKING:
+    from azure.core.credentials_async import AsyncTokenCredential
     from azure.storage.blob.aio import BlobServiceClient
 
 logger = logging.getLogger("nexhire.blob")
 
 
 @lru_cache(maxsize=1)
-def _credential() -> object:
+def _credential() -> AsyncTokenCredential:
     from azure.identity.aio import DefaultAzureCredential
 
     return DefaultAzureCredential()
 
 
 @lru_cache(maxsize=1)
-def get_client() -> "BlobServiceClient":
+def get_client() -> BlobServiceClient:
     from azure.storage.blob.aio import BlobServiceClient
 
     cfg = get_settings()
     if not cfg.azure_blob_account_url:
         raise RuntimeError("AZURE_BLOB_ACCOUNT_URL is not configured")
-    return BlobServiceClient(account_url=cfg.azure_blob_account_url, credential=_credential())
+    # Shared-key auth when the account key is present (works without
+    # `az login` / Managed Identity). Otherwise fall back to AAD.
+    credential: object = cfg.azure_blob_account_key or _credential()
+    return BlobServiceClient(account_url=cfg.azure_blob_account_url, credential=credential)
 
 
 async def upload(
@@ -50,7 +54,7 @@ async def upload(
     blob key (NOT the full URL — callers compose URLs from container +
     key as needed).
     """
-    blob_key = f"{datetime.now(timezone.utc):%Y/%m/%d}/{uuid4()}__{filename}"
+    blob_key = f"{datetime.now(UTC):%Y/%m/%d}/{uuid4()}__{filename}"
     try:
         client = get_client().get_blob_client(container=container, blob=blob_key)
         await client.upload_blob(
@@ -78,22 +82,23 @@ async def generate_sas_url(
     from azure.storage.blob import BlobSasPermissions, generate_blob_sas
 
     cfg = get_settings()
+    if not cfg.azure_blob_account_key:
+        raise AzureBlobError(
+            "SAS generation needs AZURE_BLOB_ACCOUNT_KEY (shared key). "
+            "User-delegation SAS via Managed Identity is a Phase-2 upgrade."
+        )
     try:
         client = get_client().get_blob_client(container=container, blob=blob_key)
-        # User-delegation SAS would be nicer (no shared key) but requires
-        # MI; for v1 we use the account key stored in Key Vault. Slot for
-        # upgrade in Phase 2.
-        # Note: full implementation requires shared-key access; this is
-        # the wiring shape — actual signature lands in S1 alongside the
-        # document module.
-        expiry = datetime.now(timezone.utc) + timedelta(minutes=minutes_valid)
+        expiry = datetime.now(UTC) + timedelta(minutes=minutes_valid)
+        if not client.account_name:
+            raise AzureBlobError()
         sas = generate_blob_sas(
             account_name=client.account_name,
             container_name=container,
             blob_name=blob_key,
             permission=BlobSasPermissions(read=True),
             expiry=expiry,
-            account_key=None,  # populated by S1 from Key Vault
+            account_key=cfg.azure_blob_account_key,
         )
         return f"{cfg.azure_blob_account_url}/{container}/{blob_key}?{sas}"
     except Exception as exc:

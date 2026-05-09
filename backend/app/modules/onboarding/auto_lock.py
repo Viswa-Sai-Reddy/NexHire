@@ -1,28 +1,33 @@
 """F-36 — Joining Form Auto-Lock Engine.
 
 Cross-validates the submitted joining-form fields against the
-referral-form snapshot + ID document. Clean → AUTO_LOCK and trigger
-F-34 (Non-Worker ID auto-gen). Flagged → route to HR via AI-10.
+referral-form snapshot + ID document. Submission is the sole gate:
+every joining form auto-locks and the candidate flows straight into
+NDA signing. The flag computation still runs so HR retains an audit
+trail and can use the existing 1-hour recall window if a flagged form
+needs to be revisited.
 
-Validations:
-  HIGH severity (route to HR):
+Validations recorded on the `ai_auto_actions` row:
+  HIGH severity:
     * Name mismatch (Jaro-Winkler < 0.85 between referral, form, ID).
     * PAN mismatch (referral PAN ≠ form PAN ≠ ID PAN).
     * DOB on ID ≠ form DOB.
     * Mandatory fields missing.
 
-  LOW severity (auto-lock with notes):
+  LOW severity:
     * Education-cert institution similarity < 0.75.
     * Emergency-contact missing.
 
-Decision A1 (mirrored): clean → status JOINING_FORM_LOCKED + ID_PENDING.
-Flagged → status JOINING_FORM_SUBMITTED stays + HR review task.
+Outcome:
+  Always → form.status = LOCKED, referral.status = JOINING_FORM_LOCKED.
+           Publishes JoiningFormLocked (NW-ID generator + NDA issuer
+           subscribers run downstream, identical for clean and flagged).
 """
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime
 from typing import Literal
 from uuid import UUID
 
@@ -32,7 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.infrastructure.event_bus import get_bus
 from app.middleware import audit
-from app.modules.ai import auto_router
+from app.modules.onboarding import non_worker_id as nw_id_service
 from app.modules.onboarding.models import Intern, JoiningForm
 from app.modules.referral import pan_crypto
 from app.modules.referral.models import (
@@ -44,15 +49,13 @@ from app.shared.constants import (
     AI_SYSTEM_USER_ID,
     JoiningFormStatus,
     ReferralStatus,
-    TaskType,
-    UserRole,
 )
 from app.shared.domain_events import DomainEvent
 
 logger = logging.getLogger("nexhire.onboarding.auto_lock")
 
 
-Decision = Literal["AUTO_LOCK", "ROUTED_TO_HR"]
+Decision = Literal["AUTO_LOCK"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,13 +79,6 @@ class JoiningFormLocked(DomainEvent):
     intern_id: UUID
     referral_id: UUID
     auto_locked: bool
-
-
-@dataclass(frozen=True, slots=True, kw_only=True)
-class JoiningFormRoutedToHr(DomainEvent):
-    intern_id: UUID
-    referral_id: UUID
-    flags: tuple[str, ...]
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -218,12 +214,13 @@ async def evaluate_and_route(
             )
         )
 
-    if high:
-        return await _route_to_hr(
-            session, referral=referral, intern=intern, high=high, low=low
-        )
     return await _auto_lock(
-        session, referral=referral, intern=intern, form=form, low=low
+        session,
+        referral=referral,
+        intern=intern,
+        form=form,
+        high=high,
+        low=low,
     )
 
 
@@ -233,9 +230,10 @@ async def _auto_lock(
     referral: Referral,
     intern: Intern,
     form: JoiningForm,
+    high: list[FormFlag],
     low: list[FormFlag],
 ) -> AutoLockResult:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     form.status = JoiningFormStatus.LOCKED.value
     form.locked_at = now
     form.locked_by = AI_SYSTEM_USER_ID
@@ -248,14 +246,35 @@ async def _auto_lock(
     referral.stage_entered_at = now
     referral.updated_at = now
 
+    # Generate the Non-Worker ID inline, in the same transaction as the
+    # lock. Previously this lived in an event handler with its own
+    # session — when generation failed (typically PAN decryption / env
+    # issues) the rollback was silent and the candidate ended up locked
+    # without an NW-ID. Inline keeps it atomic.
+    if intern.non_worker_id is None:
+        await nw_id_service.generate_for_intern(session, intern_id=intern.id)
+        referral.status = ReferralStatus.ID_ISSUED.value
+        referral.current_stage = ReferralStatus.ID_ISSUED.value
+        referral.stage_entered_at = now
+        referral.updated_at = now
+
+    all_flag_messages = [f.message for f in (high + low)]
+    history_reason = (
+        "Joining form auto-locked by AI with flags — see ai_auto_actions for detail."
+        if high or low
+        else "Joining form auto-locked by AI (clean)."
+    )
+
     session.add(
         AiAutoAction(
             action_type="AUTO_LOCK",
             decision="EXECUTED",
             referral_id=referral.id,
             intern_id=intern.id,
-            conditions_met=["No high-severity flags"],
-            flags=[f.message for f in low] if low else None,
+            conditions_met=(
+                ["No high-severity flags"] if not high else None
+            ),
+            flags=all_flag_messages or None,
         )
     )
     session.add(
@@ -265,7 +284,15 @@ async def _auto_lock(
             to_status=ReferralStatus.JOINING_FORM_LOCKED.value,
             actor_id=AI_SYSTEM_USER_ID,
             actor_role="SYSTEM",
-            reason="Joining form auto-locked by AI.",
+            reason=history_reason,
+            payload=(
+                {
+                    "high_flags": [f.message for f in high],
+                    "low_flags": [f.message for f in low],
+                }
+                if (high or low)
+                else None
+            ),
         )
     )
 
@@ -276,6 +303,7 @@ async def _auto_lock(
         actor_user_id=AI_SYSTEM_USER_ID,
         actor_role="SYSTEM",
         payload={
+            "high_flags": [f.message for f in high],
             "low_flags": [f.message for f in low],
             "referral_id": str(referral.id),
         },
@@ -289,65 +317,8 @@ async def _auto_lock(
             auto_locked=True,
         )
     )
-    return AutoLockResult(decision="AUTO_LOCK", low_flags=tuple(low))
-
-
-async def _route_to_hr(
-    session: AsyncSession,
-    *,
-    referral: Referral,
-    intern: Intern,
-    high: list[FormFlag],
-    low: list[FormFlag],
-) -> AutoLockResult:
-    now = datetime.now(timezone.utc)
-
-    # Form stays at SUBMITTED for HR review; referral stays at SUBMITTED
-    # of the joining-form lane.
-    sla_deadline = now + timedelta(hours=24)
-    await auto_router.create_routed_task(
-        session,
-        task_type=TaskType.JOINING_FORM_REVIEW,
-        role=UserRole.HR,
-        sla_deadline=sla_deadline,
-        referral_id=referral.id,
-        intern_id=intern.id,
-    )
-
-    session.add(
-        AiAutoAction(
-            action_type="AUTO_LOCK",
-            decision="ROUTED_TO_HR",
-            referral_id=referral.id,
-            intern_id=intern.id,
-            flags=[f.message for f in high + low],
-            hr_recommendation="REQUIRES_REVIEW",
-        )
-    )
-
-    await audit.publish(
-        event_type="JOINING_FORM_ROUTED_TO_HR",
-        entity_type="INTERN",
-        entity_id=intern.id,
-        actor_user_id=AI_SYSTEM_USER_ID,
-        actor_role="SYSTEM",
-        payload={
-            "high_flags": [f.message for f in high],
-            "low_flags": [f.message for f in low],
-        },
-        session=session,
-    )
-
-    await get_bus().publish(
-        JoiningFormRoutedToHr(
-            intern_id=intern.id,
-            referral_id=referral.id,
-            flags=tuple(f.message for f in high),
-        )
-    )
-
     return AutoLockResult(
-        decision="ROUTED_TO_HR",
+        decision="AUTO_LOCK",
         high_flags=tuple(high),
         low_flags=tuple(low),
     )
@@ -357,7 +328,6 @@ __all__ = [
     "AutoLockResult",
     "FormFlag",
     "JoiningFormLocked",
-    "JoiningFormRoutedToHr",
     "evaluate_and_route",
 ]
 

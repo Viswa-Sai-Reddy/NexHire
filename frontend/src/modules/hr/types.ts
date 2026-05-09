@@ -63,3 +63,34 @@ export interface ReferralDetail extends ReferralSummary {
   internship_end_date: string | null;
   rejection_reason: string | null;
 }
+
+export interface HrInternEntry {
+  intern_id: string;
+  referral_id: string;
+  non_worker_id: string;
+  candidate_name: string;
+  candidate_email: string;
+  intern_status: string;
+  referral_status: string;
+  project_title: string | null;
+  joining_location: string | null;
+  internship_start_date: string | null;
+  internship_end_date: string | null;
+  actual_start_date: string | null;
+  actual_end_date: string | null;
+  created_at: string;
+}
+
+export interface HrInternsResponse {
+  total: number;
+  items: HrInternEntry[];
+  limit: number;
+  offset: number;
+}
+
+export interface HrInternsParams {
+  q?: string;
+  intern_status?: string;
+  limit?: number;
+  offset?: number;
+}

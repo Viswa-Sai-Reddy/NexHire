@@ -1,0 +1,18 @@
+version:v1.0
+Name [displayName] Required,User name [userPrincipalName] Required,Initial password [passwordProfile] Required,Block sign in (Yes/No) [accountEnabled] Required,First name [givenName],Last name [surname],Job title [jobTitle],Department [department],Usage location [usageLocation],Street address [streetAddress],State or province [state],Country or region [country],Office [physicalDeliveryOfficeName],City [city],ZIP or postal code [postalCode],Office phone [telephoneNumber],Mobile phone [mobile]
+Demo Program Owner,po@karthikirisoutlook.onmicrosoft.com,NexHireDemo2026!,No,Demo,Program Owner,Program Owner,NexHire,IN,,,,,,,,
+Demo HR,hr@karthikirisoutlook.onmicrosoft.com,NexHireDemo2026!,No,Demo,HR,HR Reviewer,NexHire,IN,,,,,,,,
+Demo Referrer,referrer@karthikirisoutlook.onmicrosoft.com,NexHireDemo2026!,No,Demo,Referrer,Employee,NexHire,IN,,,,,,,,
+Demo Admin Badge,admin@karthikirisoutlook.onmicrosoft.com,NexHireDemo2026!,No,Demo,Admin,Badge Admin,NexHire,IN,,,,,,,,
+Demo IT AD,itad@karthikirisoutlook.onmicrosoft.com,NexHireDemo2026!,No,Demo,IT AD,IT Provisioning,NexHire,IN,,,,,,,,
+Demo Mentor Lead,mentor.lead@karthikirisoutlook.onmicrosoft.com,NexHireDemo2026!,No,Demo,Mentor Lead,Lead Mentor,NexHire,IN,,,,,,,,
+Demo Mentor 1,mentor1@karthikirisoutlook.onmicrosoft.com,NexHireDemo2026!,No,Demo,Mentor 1,Mentor,NexHire,IN,,,,,,,,
+Demo Mentor 2,mentor2@karthikirisoutlook.onmicrosoft.com,NexHireDemo2026!,No,Demo,Mentor 2,Mentor,NexHire,IN,,,,,,,,
+Demo Mentor 3,mentor3@karthikirisoutlook.onmicrosoft.com,NexHireDemo2026!,No,Demo,Mentor 3,Mentor,NexHire,IN,,,,,,,,
+Demo Mentor 4,mentor4@karthikirisoutlook.onmicrosoft.com,NexHireDemo2026!,No,Demo,Mentor 4,Mentor,NexHire,IN,,,,,,,,
+Demo Mentor 5,mentor5@karthikirisoutlook.onmicrosoft.com,NexHireDemo2026!,No,Demo,Mentor 5,Mentor,NexHire,IN,,,,,,,,
+Demo Mentor 6,mentor6@karthikirisoutlook.onmicrosoft.com,NexHireDemo2026!,No,Demo,Mentor 6,Mentor,NexHire,IN,,,,,,,,
+Demo Mentor 7,mentor7@karthikirisoutlook.onmicrosoft.com,NexHireDemo2026!,No,Demo,Mentor 7,Mentor,NexHire,IN,,,,,,,,
+Demo Mentor 8,mentor8@karthikirisoutlook.onmicrosoft.com,NexHireDemo2026!,No,Demo,Mentor 8,Mentor,NexHire,IN,,,,,,,,
+Demo Mentor 9,mentor9@karthikirisoutlook.onmicrosoft.com,NexHireDemo2026!,No,Demo,Mentor 9,Mentor,NexHire,IN,,,,,,,,
+Demo Mentor 10,mentor10@karthikirisoutlook.onmicrosoft.com,NexHireDemo2026!,No,Demo,Mentor 10,Mentor,NexHire,IN,,,,,,,,

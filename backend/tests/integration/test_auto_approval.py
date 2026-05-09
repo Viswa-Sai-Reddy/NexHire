@@ -1,4 +1,6 @@
-"""F-35 auto-approval engine — clean → APPROVED, flagged → HR_REVIEW."""
+"""F-35 auto-approval engine — mentor-accept always auto-approves; flags
+are recorded for audit but do not divert the referral to HR.
+"""
 from __future__ import annotations
 
 from datetime import date
@@ -20,11 +22,9 @@ from app.modules.referral.schemas import ReferralSubmitRequest
 from app.modules.workflow import auto_approval
 from app.shared.constants import (
     ReferralStatus,
-    TaskStatus,
     TaskType,
 )
 from tests.factories import future_dates, make_college, make_user, random_pan
-
 
 pytestmark = pytest.mark.asyncio
 
@@ -101,12 +101,14 @@ class TestAutoApprovalCleanCase:
 
 
 class TestAutoApprovalFlaggedCase:
-    async def test_high_risk_routes_to_hr_with_task(
+    """Flagged cases still auto-approve; flags land on `ai_auto_actions`
+    so HR can recall within the 2-hour window if needed.
+    """
+
+    async def test_high_risk_still_auto_approved(
         self, session: AsyncSession
     ) -> None:
         referral, _ = await _seeded_referral(session)
-        # Force a HIGH risk score by writing a RiskProfile row that
-        # exceeds the 25-point threshold.
         risk = (
             await session.execute(
                 select(RiskProfile).where(RiskProfile.referral_id == referral.id)
@@ -115,38 +117,41 @@ class TestAutoApprovalFlaggedCase:
         risk.risk_score = 50
         await session.flush()
 
-        # Need at least one HR user so AI-10 can route the task.
-        await make_user(session, role="HR")
-
         result = await auto_approval.evaluate_and_route(
             session, referral_id=referral.id
         )
 
-        assert result.decision == "ROUTED_TO_HR"
+        assert result.decision == "AUTO_APPROVED"
         assert any("Risk score" in f for f in result.flags)
 
         await session.refresh(referral)
-        assert referral.status == ReferralStatus.HR_REVIEW.value
+        assert referral.status == ReferralStatus.APPROVED.value
+        assert referral.approved_by_label == "AI_AUTO_APPROVAL"
 
-        # An HR_REVIEW task was created.
-        task = (
+        action = (
             await session.execute(
-                select(Task)
-                .where(
+                select(AiAutoAction).where(AiAutoAction.referral_id == referral.id)
+            )
+        ).scalar_one()
+        assert action.decision == "EXECUTED"
+        assert action.flags is not None
+        assert any("Risk score" in f for f in action.flags)
+
+        # No HR_REVIEW task should be created.
+        hr_task = (
+            await session.execute(
+                select(Task).where(
                     Task.referral_id == referral.id,
                     Task.task_type == TaskType.HR_REVIEW.value,
                 )
-                .limit(1)
             )
-        ).scalar_one()
-        assert task.status == TaskStatus.PENDING.value
-        assert task.assigned_by_ai is True
+        ).scalar_one_or_none()
+        assert hr_task is None
 
-    async def test_pan_match_hard_blocks_with_likely_reject(
+    async def test_pan_match_still_auto_approved(
         self, session: AsyncSession
     ) -> None:
         referral, _ = await _seeded_referral(session)
-        # Manually flip the duplicate-check row to PAN_EXACT.
         dup = (
             await session.execute(
                 select(DuplicateCheckResult).where(
@@ -158,27 +163,26 @@ class TestAutoApprovalFlaggedCase:
         dup.similarity_score = 1.0
         await session.flush()
 
-        await make_user(session, role="HR")
-
         result = await auto_approval.evaluate_and_route(
             session, referral_id=referral.id
         )
 
-        assert result.decision == "ROUTED_TO_HR"
-        assert result.hr_recommendation == "LIKELY_REJECT"
+        assert result.decision == "AUTO_APPROVED"
+        assert any("PAN duplicate" in f for f in result.flags)
 
         action = (
             await session.execute(
                 select(AiAutoAction).where(AiAutoAction.referral_id == referral.id)
             )
         ).scalar_one()
-        assert action.decision == "HARD_BLOCK"
+        assert action.decision == "EXECUTED"
+        assert action.flags is not None
+        assert any("PAN duplicate" in f for f in action.flags)
 
-    async def test_low_confidence_only_likely_approve(
+    async def test_low_confidence_still_auto_approved(
         self, session: AsyncSession
     ) -> None:
         referral, _ = await _seeded_referral(session)
-        # Write a low-confidence parse row.
         session.add(
             AiParseResult(
                 ai_touchpoint="RESUME_PARSE",
@@ -191,11 +195,8 @@ class TestAutoApprovalFlaggedCase:
         )
         await session.flush()
 
-        await make_user(session, role="HR")
-
         result = await auto_approval.evaluate_and_route(
             session, referral_id=referral.id
         )
-        assert result.decision == "ROUTED_TO_HR"
-        assert result.hr_recommendation == "LIKELY_APPROVE"
+        assert result.decision == "AUTO_APPROVED"
         assert any("Low confidence" in f for f in result.flags)

@@ -14,13 +14,13 @@ Three operations:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
-from typing import Optional
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.infrastructure.event_bus import get_bus
 from app.middleware import audit
 from app.modules.auth import jwt_service
 from app.modules.auth.models import ActionToken, User
@@ -29,19 +29,20 @@ from app.modules.onboarding.models import Intern, JoiningForm
 from app.modules.referral.models import Referral
 from app.shared.constants import (
     AI_SYSTEM_USER_ID,
+    MAGIC_LINK_EXPIRY_HOURS,
     ActionTokenType,
     InternStatus,
-    MAGIC_LINK_EXPIRY_HOURS,
     ReferralStatus,
     UserRole,
 )
+from app.shared.domain_events import CandidateMagicLinkIssued
 from app.shared.value_objects import InternId, ReferralId, UserId
 
 logger = logging.getLogger("nexhire.onboarding.magic_link")
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -123,6 +124,22 @@ async def provision_candidate(
         session=session,
     )
 
+    logger.info(
+        f"provision_candidate: publishing CandidateMagicLinkIssued "
+        f"referral_id={referral.id} intern_id={intern.id} "
+        f"candidate_email={user.email}"
+    )
+    await get_bus().publish(
+        CandidateMagicLinkIssued(
+            referral_id=ReferralId(referral.id),
+            intern_id=InternId(intern.id),
+            candidate_email=user.email,
+            candidate_name=user.full_name,
+            raw_token=issued.raw_token,
+            expires_at=issued.expires_at,
+        )
+    )
+
     return user, intern, issued
 
 
@@ -130,16 +147,24 @@ async def issue_fresh_link(
     session: AsyncSession,
     *,
     intern_id: UUID,
-    actor_user_id: Optional[UUID] = None,
+    actor_user_id: UUID | None = None,
 ) -> action_tokens.IssuedToken:
-    """HR-driven resend or candidate self-resend. Invalidates older
-    active CANDIDATE_ACCESS rows for this intern.
+    """HR-driven resend or candidate self-resend.
+
+    Older unused CANDIDATE_ACCESS tokens are *not* invalidated here.
+    Each token is single-use (consumed on redeem) and time-bounded by
+    `MAGIC_LINK_EXPIRY_HOURS`, so multiple concurrent magic links can
+    safely coexist. This avoids the failure mode where a candidate
+    requests a fresh link and the older email's link suddenly stops
+    working — they can use whichever link they have at hand.
     """
     intern = (
         await session.execute(select(Intern).where(Intern.id == intern_id))
     ).scalar_one()
+    user = (
+        await session.execute(select(User).where(User.id == intern.user_id))
+    ).scalar_one()
 
-    await _invalidate_candidate_tokens(session, intern_id=intern.id)
     issued = await action_tokens.issue(
         session,
         action_type=ActionTokenType.CANDIDATE_ACCESS,
@@ -156,6 +181,17 @@ async def issue_fresh_link(
         payload={"expires_at": issued.expires_at.isoformat()},
         session=session,
     )
+
+    await get_bus().publish(
+        CandidateMagicLinkIssued(
+            referral_id=ReferralId(intern.referral_id),
+            intern_id=InternId(intern.id),
+            candidate_email=user.email,
+            candidate_name=user.full_name,
+            raw_token=issued.raw_token,
+            expires_at=issued.expires_at,
+        )
+    )
     return issued
 
 
@@ -166,7 +202,7 @@ async def redeem(
     session: AsyncSession,
     *,
     raw_token: str,
-    ip_address: Optional[str] = None,
+    ip_address: str | None = None,
 ) -> tuple[User, Intern, str, int, str]:
     """Validate the magic link, mark it consumed, return:
 
@@ -195,6 +231,44 @@ async def redeem(
         await session.execute(select(User).where(User.id == token.actor_user_id))
     ).scalar_one()
 
+    # Self-heal: legacy candidates whose joining form was locked before
+    # the inline-NW-ID fix can land here without an NW-ID. Generate one
+    # lazily so they never hit a dead-end "(pending)" state.
+    if intern.non_worker_id is None:
+        referral_for_heal = (
+            await session.execute(
+                select(Referral).where(Referral.id == intern.referral_id)
+            )
+        ).scalar_one()
+        past_lock_states = {
+            ReferralStatus.JOINING_FORM_LOCKED.value,
+            ReferralStatus.ID_PENDING.value,
+            ReferralStatus.ID_ISSUED.value,
+            ReferralStatus.NDA_PENDING.value,
+            ReferralStatus.NDA_SIGNED.value,
+            ReferralStatus.ACCESS_PENDING.value,
+            ReferralStatus.ACTIVE.value,
+            ReferralStatus.EXTENDED.value,
+            ReferralStatus.CLOSURE_PENDING.value,
+            ReferralStatus.CLOSED.value,
+        }
+        if referral_for_heal.status in past_lock_states:
+            from app.modules.onboarding import non_worker_id as nw_id_service
+
+            try:
+                await nw_id_service.generate_for_intern(
+                    session, intern_id=intern.id
+                )
+                logger.info(
+                    "nexhire.magic_link.nw_id_self_healed",
+                    extra={"intern_id": str(intern.id)},
+                )
+            except Exception:
+                logger.exception(
+                    "nexhire.magic_link.nw_id_self_heal_failed",
+                    extra={"intern_id": str(intern.id)},
+                )
+
     access_token, expires_in = jwt_service.issue_access_token(
         user_id=user.id,
         email=user.email,
@@ -203,7 +277,7 @@ async def redeem(
         intern_id=intern.id,
     )
 
-    redirect = _redirect_for_status(intern, session)
+    redirect = await _redirect_for_status(intern, session)
     await audit.publish(
         event_type="MAGIC_LINK_USED",
         entity_type="INTERN",
@@ -211,10 +285,10 @@ async def redeem(
         actor_user_id=user.id,
         actor_role="CANDIDATE",
         ip_address=ip_address,
-        payload={"redirect": await redirect},
+        payload={"redirect": redirect},
         session=session,
     )
-    return user, intern, access_token, expires_in, await redirect
+    return user, intern, access_token, expires_in, redirect
 
 
 async def _redirect_for_status(intern: Intern, session: AsyncSession) -> str:

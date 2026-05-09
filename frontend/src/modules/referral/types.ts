@@ -124,6 +124,8 @@ export interface ReferralSummary {
   mentor_id?: string | null;
   mentor_attempt_count: number;
   created_at: string;
+  intern_id?: string | null;
+  intern_status?: string | null;
 }
 
 /* ─── S2 — AI-2 mentor matcher ─── */

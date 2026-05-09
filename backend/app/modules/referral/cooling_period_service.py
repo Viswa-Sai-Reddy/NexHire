@@ -17,8 +17,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
-from typing import Optional
+from datetime import UTC, date, datetime, timedelta
 from uuid import UUID
 
 from dateutil.relativedelta import relativedelta
@@ -49,17 +48,17 @@ class CoolingStatus:
     """Result of a PAN-scoped cooling check."""
 
     is_in_cooling: bool
-    terminal_state: Optional[str] = None
-    cooling_start: Optional[date] = None
-    cooling_end: Optional[date] = None
-    days_remaining: Optional[int] = None
-    months_duration: Optional[int] = None
+    terminal_state: str | None = None
+    cooling_start: date | None = None
+    cooling_end: date | None = None
+    days_remaining: int | None = None
+    months_duration: int | None = None
     override_applied: bool = False
-    referral_id: Optional[UUID] = None
+    referral_id: UUID | None = None
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 async def get_status(session: AsyncSession, *, pan_hash: str) -> CoolingStatus:

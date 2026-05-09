@@ -15,7 +15,7 @@ import logging
 from datetime import date
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Query, UploadFile
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.infrastructure.database import get_session
@@ -39,10 +39,60 @@ from app.shared.exceptions import (
     InsufficientPermissionsError,
 )
 
-
 logger = logging.getLogger("nexhire.router.referral")
 
 router = APIRouter(prefix="/referrals", tags=["referrals"])
+
+
+# ────────────────────────────────────────────────────────────────────
+# GET /referrals/{referral_id}/resume — mentor / HR / PO download.
+# Returns a short-lived SAS URL the client can open in a new tab.
+# ────────────────────────────────────────────────────────────────────
+@router.get(
+    "/{referral_id}/resume",
+    summary="Issue a short-lived URL to download the candidate's resume.",
+)
+async def get_resume_url(
+    referral_id: UUID,
+    principal: CurrentUser,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, str]:
+    from sqlalchemy import select
+
+    from app.infrastructure import azure_blob
+    from app.modules.referral.models import Document, Referral
+
+    referral = (
+        await session.execute(select(Referral).where(Referral.id == referral_id))
+    ).scalar_one_or_none()
+    if referral is None:
+        raise BusinessRuleError(user_message="Referral not found.")
+
+    is_assigned_mentor = referral.mentor_id == principal.user_id
+    is_admin = principal.role in (
+        UserRole.HR.value,
+        UserRole.PROGRAM_OWNER.value,
+    )
+    if not (is_assigned_mentor or is_admin):
+        raise InsufficientPermissionsError()
+
+    if referral.resume_document_id is None:
+        raise BusinessRuleError(
+            user_message="No resume was uploaded with this referral."
+        )
+
+    document = (
+        await session.execute(
+            select(Document).where(Document.id == referral.resume_document_id)
+        )
+    ).scalar_one()
+
+    url = await azure_blob.generate_sas_url(
+        document.azure_blob_container,
+        document.azure_blob_key,
+        minutes_valid=15,
+    )
+    return {"url": url, "file_name": document.file_name}
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -113,6 +163,61 @@ def _value_int(v) -> int | None:  # type: ignore[no-untyped-def]
         return int(v)
     except (TypeError, ValueError):
         return None
+
+
+# ────────────────────────────────────────────────────────────────────
+# POST /referrals/upload-resume/{document_id}/analyze
+# Phase 2 of resume parsing — slower AI step. Frontend calls this
+# after the upload returns, while the user reviews the basic fields.
+# ────────────────────────────────────────────────────────────────────
+@router.post(
+    "/upload-resume/{document_id}/analyze",
+    response_model=ResumePrefillResponse,
+    dependencies=[Depends(rate_limit("ai")), Depends(require(Permission.SUBMIT_REFERRAL))],
+    summary="Run GPT-4o on the cached OCR text and return enriched fields.",
+)
+async def analyze_resume(
+    document_id: UUID,
+    principal: CurrentUser,
+    session: AsyncSession = Depends(get_session),
+) -> ResumePrefillResponse:
+    _ = principal
+    from app.modules.ai import service as ai_service
+
+    parse_result = await ai_service.analyze_uploaded_resume(
+        session, document_id=document_id
+    )
+
+    response = ResumePrefillResponse(
+        document_id=document_id,
+        succeeded=parse_result.succeeded,
+        user_message=parse_result.user_message,
+        degradation_reason=parse_result.degradation_reason,
+    )
+    if parse_result.data:
+        d = parse_result.data
+        response = response.model_copy(
+            update={
+                "candidate_name": _value_str(d.candidate_name.value),
+                "candidate_name_confidence": d.candidate_name.confidence,
+                "candidate_email": _value_str(d.email.value),
+                "candidate_email_confidence": d.email.confidence,
+                "candidate_phone": _value_str(d.phone.value),
+                "candidate_phone_confidence": d.phone.confidence,
+                "candidate_year_of_study": _value_int(d.year_of_study.value),
+                "candidate_year_of_study_confidence": d.year_of_study.confidence,
+                "college_name": _value_str(d.college.value),
+                "college_name_confidence": d.college.confidence,
+                "candidate_graduation_year": _value_int(d.graduation_year.value),
+                "candidate_graduation_year_confidence": d.graduation_year.confidence,
+                "skills": d.skills,
+                "suggested_project_tracks": d.suggested_project_tracks,
+                "red_flags": d.red_flags,
+                "recommended_mentor_questions": d.recommended_mentor_questions,
+                "internship_readiness_score": d.internship_readiness_score,
+            }
+        )
+    return response
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -215,7 +320,7 @@ async def my_referrals(
     session: AsyncSession = Depends(get_session),
 ) -> list[ReferralSummary]:
     rows = await repository.list_for_referrer(session, referrer_id=principal.user_id)
-    return [_to_summary(r) for r in rows]
+    return [_to_summary(r, intern=i) for r, i in rows]
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -265,7 +370,7 @@ async def get_referral(
 # ────────────────────────────────────────────────────────────────────
 # Helpers.
 # ────────────────────────────────────────────────────────────────────
-def _to_summary(r) -> ReferralSummary:  # type: ignore[no-untyped-def]
+def _to_summary(r, *, intern=None) -> ReferralSummary:  # type: ignore[no-untyped-def]
     return ReferralSummary(
         id=r.id,
         status=r.status,
@@ -279,6 +384,8 @@ def _to_summary(r) -> ReferralSummary:  # type: ignore[no-untyped-def]
         mentor_id=r.mentor_id,
         mentor_attempt_count=r.mentor_attempt_count,
         created_at=r.created_at,
+        intern_id=intern.id if intern is not None else None,
+        intern_status=intern.status if intern is not None else None,
     )
 
 

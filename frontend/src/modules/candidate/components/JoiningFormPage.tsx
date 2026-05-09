@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { CheckCircle2, Loader2, XCircle } from "lucide-react";
 
 import { NexHireApiError } from "@/lib/axios";
 import {
@@ -8,16 +9,18 @@ import {
   submitJoiningForm,
   type JoiningFormDraft,
 } from "@/modules/candidate/api";
+import {
+  Badge,
+  Button,
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+  Input as UiInput,
+} from "@/shared/components/ui";
 
 /**
- * S9 — Candidate joining form.
- *
- * Multi-section, optimistic-locked, auto-saves every 60s. The form
- * submission triggers AI-6 cross-validation (auto-lock or route-to-HR).
- *
- * Sections in v1: Personal Details · Address · Emergency Contact ·
- * Education · Government IDs · Declaration. Document uploads land in
- * a follow-up turn.
+ * S9 — Candidate joining form (multi-section, auto-saving).
  */
 export function JoiningFormPage() {
   const navigate = useNavigate();
@@ -38,7 +41,6 @@ export function JoiningFormPage() {
       );
   }, []);
 
-  // Auto-save loop (60s) when the form is editable.
   useEffect(() => {
     if (form === null || form.status === "LOCKED") return;
     const interval = window.setInterval(() => {
@@ -49,11 +51,12 @@ export function JoiningFormPage() {
 
   if (error !== null && form === null) {
     return (
-      <div className="container py-12">
+      <div className="mx-auto max-w-4xl px-4 py-12 sm:px-6">
         <p
           role="alert"
-          className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive"
+          className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
         >
+          <XCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
           {error}
         </p>
       </div>
@@ -61,7 +64,8 @@ export function JoiningFormPage() {
   }
   if (form === null) {
     return (
-      <div className="container py-12 text-sm text-muted-foreground">
+      <div className="mx-auto flex max-w-4xl items-center gap-2 px-4 py-12 text-sm text-muted-foreground sm:px-6">
+        <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
         Loading…
       </div>
     );
@@ -98,7 +102,10 @@ export function JoiningFormPage() {
           ? "Form auto-locked by AI. Proceeding to NDA…"
           : "Form submitted. HR is reviewing — you'll receive an email shortly.",
       );
-      window.setTimeout(() => navigate(result.next_redirect, { replace: true }), 1_500);
+      window.setTimeout(
+        () => navigate(result.next_redirect, { replace: true }),
+        1_500,
+      );
     } catch (err) {
       setError(
         err instanceof NexHireApiError ? err.message : "Submission failed.",
@@ -107,40 +114,43 @@ export function JoiningFormPage() {
   };
 
   return (
-    <div className="container py-10">
+    <div className="mx-auto max-w-4xl px-4 py-8 sm:px-6 lg:py-10">
       <header className="mb-6">
-        <h1 className="text-2xl font-semibold">Joining Form</h1>
+        <h1 className="text-2xl font-semibold tracking-tight">Joining Form</h1>
         <p className="mt-1 text-sm text-muted-foreground">
           Auto-saves every minute. You can return via the link in your email
           for up to 72 hours.
         </p>
-        <p className="mt-1 text-xs text-muted-foreground">
-          Status: <strong>{form.status}</strong> · version {form.version}
+        <p className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
+          Status: <Badge variant="muted">{form.status}</Badge>
+          <span>· version {form.version}</span>
         </p>
       </header>
 
       {error && (
         <p
           role="alert"
-          className="mb-4 rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive"
+          className="mb-4 flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
         >
+          <XCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
           {error}
         </p>
       )}
       {submittingMessage && (
-        <p className="mb-4 rounded-md bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
+        <p className="mb-4 flex items-start gap-2 rounded-md border border-stage-active/30 bg-stage-active/10 px-3 py-2 text-sm text-stage-active">
+          <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
           {submittingMessage}
         </p>
       )}
 
       <Section title="Personal Details">
-        <Input
+        <FieldInput
           label="Full name *"
           value={(form.personal_details.full_name as string) ?? ""}
           onChange={(v) => updateNested("personal_details", "full_name", v)}
           disabled={!editable}
         />
-        <Input
+        <FieldInput
           label="Date of birth *"
           type="date"
           value={(form.personal_details.date_of_birth as string) ?? ""}
@@ -152,7 +162,7 @@ export function JoiningFormPage() {
       </Section>
 
       <Section title="Address">
-        <Input
+        <FieldInput
           label="Current address"
           value={(form.address.current_address as string) ?? ""}
           onChange={(v) => updateNested("address", "current_address", v)}
@@ -161,13 +171,13 @@ export function JoiningFormPage() {
       </Section>
 
       <Section title="Emergency Contact">
-        <Input
+        <FieldInput
           label="Contact name"
           value={(form.emergency_contact.name as string) ?? ""}
           onChange={(v) => updateNested("emergency_contact", "name", v)}
           disabled={!editable}
         />
-        <Input
+        <FieldInput
           label="Contact phone"
           value={(form.emergency_contact.phone as string) ?? ""}
           onChange={(v) => updateNested("emergency_contact", "phone", v)}
@@ -176,7 +186,7 @@ export function JoiningFormPage() {
       </Section>
 
       <Section title="Government IDs">
-        <Input
+        <FieldInput
           label="PAN number"
           value={(form.govt_ids.pan_number as string) ?? ""}
           onChange={(v) =>
@@ -187,13 +197,13 @@ export function JoiningFormPage() {
       </Section>
 
       <Section title="Declaration">
-        <label className="flex items-start gap-2 text-sm">
+        <label className="flex items-start gap-2 text-sm md:col-span-2">
           <input
             type="checkbox"
             checked={form.declaration_signed}
             onChange={(e) => update("declaration_signed", e.target.checked)}
             disabled={!editable}
-            className="mt-1"
+            className="mt-1 h-4 w-4 rounded border-border focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
           />
           <span>
             I confirm that all information provided is accurate, and I consent
@@ -204,22 +214,23 @@ export function JoiningFormPage() {
 
       {editable && (
         <div className="mt-8 flex items-center justify-end gap-3">
-          <button
+          <Button
             type="button"
+            variant="outline"
             onClick={() =>
               void saveSnapshot(form, lastSavedRef, setForm, setError)
             }
-            className="rounded-md border border-border px-4 py-2 text-sm font-medium hover:bg-secondary"
           >
             Save draft
-          </button>
-          <button
+          </Button>
+          <Button
             type="button"
-            onClick={handleSubmit}
-            className="rounded-md bg-primary px-5 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90"
+            onClick={() => {
+              void handleSubmit();
+            }}
           >
             Submit form
-          </button>
+          </Button>
         </div>
       )}
     </div>
@@ -234,14 +245,16 @@ function Section({
   children: React.ReactNode;
 }) {
   return (
-    <section className="mb-6 rounded-xl border border-border bg-card p-6 shadow-sm">
-      <h2 className="text-base font-semibold">{title}</h2>
-      <div className="mt-4 grid gap-4 md:grid-cols-2">{children}</div>
-    </section>
+    <Card className="mb-6">
+      <CardHeader>
+        <CardTitle>{title}</CardTitle>
+      </CardHeader>
+      <CardContent className="grid gap-4 md:grid-cols-2">{children}</CardContent>
+    </Card>
   );
 }
 
-function Input({
+function FieldInput({
   label,
   value,
   onChange,
@@ -255,14 +268,13 @@ function Input({
   disabled?: boolean;
 }) {
   return (
-    <label className="block text-sm">
+    <label className="block space-y-1.5 text-sm">
       <span className="font-medium">{label}</span>
-      <input
+      <UiInput
         type={type}
         value={value}
         onChange={(e) => onChange(e.target.value)}
         disabled={disabled}
-        className="mt-1 w-full rounded-md border border-border bg-card px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary disabled:opacity-60"
       />
     </label>
   );

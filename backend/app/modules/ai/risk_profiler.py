@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date
 from typing import Any, Literal
 
@@ -183,7 +183,7 @@ async def _generate_narrative(
     except (AzureOpenAiError, AzureOpenAiQuotaExceededError):
         logger.warning("nexhire.ai.risk.narrative_unavailable")
         return ""
-    except Exception:  # noqa: BLE001 — narrative is best-effort
+    except Exception:
         logger.exception("nexhire.ai.risk.narrative_unexpected")
         return ""
 

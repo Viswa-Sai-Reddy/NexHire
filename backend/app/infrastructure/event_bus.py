@@ -38,7 +38,7 @@ import logging
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any, TypeVar
 
 from app.shared.domain_events import DomainEvent
@@ -93,10 +93,32 @@ class InProcessEventBus:
         return list(self._handlers.get(type(event), []))
 
     async def publish(self, event: DomainEvent) -> None:
-        """Invoke every handler for `event`. Failures isolated per handler.
+        """Invoke every handler for `event`.
 
-        Handlers run concurrently; a slow handler never blocks a fast one.
+        If called inside a FastAPI request that has an active session,
+        defer dispatch until *after* the request transaction commits.
+        This way handlers that open their own session can see the rows
+        the producer just wrote. Outside a request (e.g. scheduled jobs)
+        run handlers immediately.
+
+        Failures are isolated per handler; handlers run concurrently.
         """
+        # Defer if there's an in-flight request session.
+        from app.infrastructure.database import current_request_session
+
+        active_session = current_request_session()
+        if active_session is not None:
+            queue = active_session.info.setdefault("after_commit", [])
+            queue.append(lambda e=event: self._dispatch(e))
+            logger.debug(
+                "nexhire.events.deferred",
+                extra={"event_type": event.event_type, "event_id": str(event.event_id)},
+            )
+            return
+
+        await self._dispatch(event)
+
+    async def _dispatch(self, event: DomainEvent) -> None:
         handlers = self.handlers_for(event)
         if not handlers:
             logger.debug(
@@ -160,7 +182,7 @@ class InProcessEventBus:
                         status="PENDING",
                         retry_count=0,
                         last_error=str(error)[:1000],
-                        created_at=datetime.now(timezone.utc),
+                        created_at=datetime.now(UTC),
                     )
                 )
             logger.info(

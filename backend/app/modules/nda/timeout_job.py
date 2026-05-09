@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
@@ -38,7 +38,7 @@ async def _send_reminders(session) -> None:  # type: ignore[no-untyped-def]
     so the scheduler is idempotent — full email wiring lands when the
     reminder template is added.
     """
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     rows = (
         await session.execute(
             select(NdaRecord).where(NdaRecord.status == NdaStatus.SENT.value)

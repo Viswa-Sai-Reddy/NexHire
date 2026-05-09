@@ -22,6 +22,17 @@ export async function uploadResume(file: File): Promise<ResumePrefillResponse> {
   return data;
 }
 
+/** Phase 2 — AI structured-field extraction. Slower; runs after the
+ *  user already has the basic fields visible. */
+export async function analyzeUploadedResume(
+  documentId: string,
+): Promise<ResumePrefillResponse> {
+  const { data } = await api.post<ResumePrefillResponse>(
+    `/referrals/upload-resume/${documentId}/analyze`,
+  );
+  return data;
+}
+
 export async function checkPan(pan: string): Promise<PanCheckResponse> {
   const { data } = await api.post<PanCheckResponse>("/referrals/check-pan", { pan });
   return data;
@@ -71,5 +82,16 @@ export async function submitReferral(
 
 export async function listMyReferrals(): Promise<ReferralSummary[]> {
   const { data } = await api.get<ReferralSummary[]>("/referrals/me");
+  return data;
+}
+
+export async function terminateIntern(
+  internId: string,
+  reason: string,
+): Promise<{ status: string }> {
+  const { data } = await api.post<{ status: string }>("/interns/terminate", {
+    intern_id: internId,
+    reason,
+  });
   return data;
 }

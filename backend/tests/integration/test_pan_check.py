@@ -7,7 +7,7 @@ Exercises the real DB (testcontainers Postgres) so we cover:
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,7 +16,6 @@ from app.modules.referral import pan_crypto, validator
 from app.modules.referral.models import Referral
 from app.shared.constants import ReferralStatus
 from tests.factories import future_dates, make_college, make_user, random_pan
-
 
 pytestmark = pytest.mark.asyncio
 
@@ -37,7 +36,7 @@ async def _seed_referral(
     cooling_start = None
     cooling_end = None
     if cooling_end_offset_days is not None:
-        cooling_start = datetime.now(timezone.utc)
+        cooling_start = datetime.now(UTC)
         cooling_end = cooling_start + timedelta(days=cooling_end_offset_days)
 
     referral = Referral(

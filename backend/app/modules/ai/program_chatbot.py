@@ -202,7 +202,7 @@ async def ask(session: AsyncSession, *, question: str) -> ChatAnswer:
         answer = (followup.choices[0].message.content or "").strip()
         return ChatAnswer(
             answer=answer or "I don't have enough data to answer this yet.",
-            data_source=",".join(t["name"] for t in tool_results) or "none",
+            data_source=",".join(str(t["name"]) for t in tool_results) or "none",
             confidence="HIGH" if tool_results else "LOW",
         )
     except (AzureOpenAiError, AzureOpenAiQuotaExceededError):
@@ -211,7 +211,7 @@ async def ask(session: AsyncSession, *, question: str) -> ChatAnswer:
             data_source="none",
             confidence="LOW",
         )
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.exception("nexhire.ai.chatbot.unexpected")
         return ChatAnswer(
             answer="Could not process the question. Please rephrase.",
@@ -220,4 +220,4 @@ async def ask(session: AsyncSession, *, question: str) -> ChatAnswer:
         )
 
 
-__all__ = ["ChatAnswer", "MODEL_TOUCHPOINT", "ask"]
+__all__ = ["MODEL_TOUCHPOINT", "ChatAnswer", "ask"]

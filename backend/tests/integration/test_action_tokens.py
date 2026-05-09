@@ -6,7 +6,7 @@ decision B12). The tests below pin those guarantees.
 """
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import update
@@ -21,7 +21,6 @@ from app.shared.exceptions import (
     MagicLinkInvalidError,
 )
 from tests.factories import make_user
-
 
 pytestmark = pytest.mark.asyncio
 
@@ -93,7 +92,7 @@ class TestActionTokenLifecycle:
         await session.execute(
             update(ActionToken)
             .where(ActionToken.id == issued.token_id)
-            .values(expires_at=datetime.now(timezone.utc) - timedelta(seconds=1))
+            .values(expires_at=datetime.now(UTC) - timedelta(seconds=1))
         )
         with pytest.raises(ActionTokenExpiredError):
             await action_tokens.validate(

@@ -23,10 +23,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.infrastructure.database import get_session
 from app.middleware.auth import CurrentUser
 from app.middleware.rate_limit import rate_limit
+from datetime import UTC, datetime
+
+from sqlalchemy import select
+
+from app.infrastructure import azure_openai
+from app.middleware import audit
 from app.modules.admin import config_service, dashboard_service
 from app.modules.ai import program_chatbot
 from app.modules.auth.rbac import Permission, require
-
+from app.modules.referral import cooling_period_service
+from app.modules.referral.models import NotificationTemplate
+from app.shared.constants import COOLING_OVERRIDE_MIN_REASON_LENGTH
+from app.shared.exceptions import BusinessRuleError
 
 admin_router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -189,6 +198,174 @@ async def config_history(
     session: AsyncSession = Depends(get_session),
 ) -> list[dict[str, Any]]:
     return await config_service.list_history(session)
+
+
+# ────────────────────────────────────────────────────────────────────
+# Cooling-period override (PO only — RULE-CP7).
+# ────────────────────────────────────────────────────────────────────
+class CoolingOverrideRequest(BaseModel):
+    reason: str = Field(..., min_length=COOLING_OVERRIDE_MIN_REASON_LENGTH, max_length=2000)
+
+
+@admin_router.post(
+    "/cooling-overrides/{referral_id}",
+    dependencies=[
+        Depends(rate_limit("default")),
+        Depends(require(Permission.OVERRIDE_COOLING_PERIOD)),
+    ],
+    summary="PO overrides the active cooling period on a terminal referral (RULE-CP7).",
+)
+async def cooling_override_endpoint(
+    referral_id: UUID,
+    body: CoolingOverrideRequest,
+    principal: CurrentUser,
+    session: AsyncSession = Depends(get_session),
+) -> dict[str, str]:
+    await cooling_period_service.apply_override(
+        session,
+        referral_id=referral_id,
+        program_owner_id=principal.user_id,
+        program_owner_role=principal.role,
+        reason=body.reason,
+    )
+    return {"referral_id": str(referral_id), "status": "OVERRIDDEN"}
+
+
+# ────────────────────────────────────────────────────────────────────
+# Notification template management.
+# ────────────────────────────────────────────────────────────────────
+class TemplateEntry(BaseModel):
+    template_id: str
+    subject: str
+    is_active: bool
+    updated_by: UUID | None
+    updated_at: datetime
+    created_at: datetime
+
+
+class TemplateUpdateRequest(BaseModel):
+    subject: str | None = Field(None, min_length=3, max_length=500)
+    is_active: bool | None = None
+
+
+@admin_router.get(
+    "/notification-templates",
+    response_model=list[TemplateEntry],
+    dependencies=[Depends(require(Permission.SYSTEM_CONFIGURATION))],
+    summary="List all notification templates (PO only).",
+)
+async def list_templates(
+    session: AsyncSession = Depends(get_session),
+) -> list[TemplateEntry]:
+    rows = (
+        await session.execute(
+            select(NotificationTemplate).order_by(NotificationTemplate.template_id)
+        )
+    ).scalars().all()
+    return [
+        TemplateEntry(
+            template_id=t.template_id,
+            subject=t.subject,
+            is_active=t.is_active,
+            updated_by=t.updated_by,
+            updated_at=t.updated_at,
+            created_at=t.created_at,
+        )
+        for t in rows
+    ]
+
+
+@admin_router.patch(
+    "/notification-templates/{template_id}",
+    response_model=TemplateEntry,
+    dependencies=[
+        Depends(rate_limit("default")),
+        Depends(require(Permission.SYSTEM_CONFIGURATION)),
+    ],
+    summary="Edit a notification template's subject or active flag (PO only).",
+)
+async def update_template(
+    template_id: str,
+    body: TemplateUpdateRequest,
+    principal: CurrentUser,
+    session: AsyncSession = Depends(get_session),
+) -> TemplateEntry:
+    template = (
+        await session.execute(
+            select(NotificationTemplate).where(
+                NotificationTemplate.template_id == template_id
+            )
+        )
+    ).scalar_one_or_none()
+    if template is None:
+        raise BusinessRuleError(
+            user_message=f"Notification template {template_id!r} not found."
+        )
+
+    changes: dict[str, Any] = {}
+    if body.subject is not None and body.subject != template.subject:
+        changes["subject"] = {"from": template.subject, "to": body.subject}
+        template.subject = body.subject
+    if body.is_active is not None and body.is_active != template.is_active:
+        changes["is_active"] = {"from": template.is_active, "to": body.is_active}
+        template.is_active = body.is_active
+
+    if not changes:
+        raise BusinessRuleError(
+            user_message="No changes provided. Set subject and/or is_active."
+        )
+
+    now = datetime.now(UTC)
+    template.updated_by = principal.user_id
+    template.updated_at = now
+
+    await audit.publish(
+        event_type="NOTIFICATION_TEMPLATE_UPDATED",
+        entity_type="NOTIFICATION_TEMPLATE",
+        entity_id=None,  # template_id is a string PK; surface in payload
+        actor_user_id=principal.user_id,
+        actor_role=principal.role.value,
+        payload={"template_id": template_id, "changes": changes},
+        session=session,
+    )
+
+    return TemplateEntry(
+        template_id=template.template_id,
+        subject=template.subject,
+        is_active=template.is_active,
+        updated_by=template.updated_by,
+        updated_at=template.updated_at,
+        created_at=template.created_at,
+    )
+
+
+# ────────────────────────────────────────────────────────────────────
+# AI usage snapshot (last N calls in-process — Application Insights
+# remains the canonical aggregator once configured).
+# ────────────────────────────────────────────────────────────────────
+class AiUsageEntry(BaseModel):
+    operation: str
+    tokens_total: int | None
+    latency_ms: int
+    succeeded: bool
+
+
+@admin_router.get(
+    "/ai-usage",
+    response_model=list[AiUsageEntry],
+    dependencies=[Depends(require(Permission.VIEW_SLA_DASHBOARD))],
+    summary="Last 100 Azure OpenAI calls (newest first) — debugging snapshot.",
+)
+async def ai_usage(limit: int = 100) -> list[AiUsageEntry]:
+    return [
+        AiUsageEntry(
+            operation=e.operation,
+            tokens_total=e.tokens_total,
+            latency_ms=e.latency_ms,
+            succeeded=e.succeeded,
+        )
+        for e in azure_openai.recent_usage(limit=limit)
+    ]
 
 
 # ────────────────────────────────────────────────────────────────────

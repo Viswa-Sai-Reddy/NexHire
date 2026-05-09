@@ -21,8 +21,8 @@ recall is a clean state-revert.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
-from typing import Mapping
+from collections.abc import Mapping
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import select
@@ -36,6 +36,7 @@ from app.modules.referral.models import (
     Referral,
     ReferralStageHistory,
 )
+from app.modules.workflow.auto_approval import AUTO_APPROVE_RECALL_HOURS
 from app.shared.constants import (
     ReferralStatus,
     TaskType,
@@ -48,7 +49,6 @@ from app.shared.exceptions import (
     InvalidStateTransitionError,
 )
 from app.shared.value_objects import ReferralId, UserId
-from app.modules.workflow.auto_approval import AUTO_APPROVE_RECALL_HOURS
 
 logger = logging.getLogger("nexhire.workflow.recall")
 
@@ -136,7 +136,7 @@ async def recall_auto_approve(
     if auto_action.recalled_at is not None:
         raise AlreadyRecalledError()
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     window_end = auto_action.executed_at + timedelta(
         hours=RECALL_HOURS["AUTO_APPROVE"]
     )
@@ -203,8 +203,8 @@ async def recall_auto_approve(
 
 
 __all__ = [
-    "AlreadyRecalledError",
     "RECALL_HOURS",
+    "AlreadyRecalledError",
     "RecallWindowExpiredError",
     "recall_auto_approve",
 ]

@@ -12,7 +12,7 @@ Postgres-native UUIDs.
 from __future__ import annotations
 
 from datetime import date, datetime
-from typing import Any, Optional
+from typing import Any
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
@@ -29,7 +29,8 @@ from sqlalchemy import (
     Text,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID as PgUUID
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.infrastructure.database import Base
@@ -56,26 +57,29 @@ class CoolingPeriodConfig(Base):
         DateTime(timezone=True),
         nullable=False,
         server_default=text("NOW()"),
+        init=False,
     )
-    set_by: Mapped[Optional[UUID]] = mapped_column(
+    set_by: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
         default=None,
     )
-    reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True, default=None)
-    previous_value: Mapped[Optional[int]] = mapped_column(
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    previous_value: Mapped[int | None] = mapped_column(
         SmallInteger, nullable=True, default=None
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         server_default=text("NOW()"),
+        init=False,
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         server_default=text("NOW()"),
+        init=False,
     )
 
 
@@ -94,14 +98,15 @@ class MentorThresholdConfig(Base):
         DateTime(timezone=True),
         nullable=False,
         server_default=text("NOW()"),
+        init=False,
     )
-    set_by: Mapped[Optional[UUID]] = mapped_column(
+    set_by: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
         default=None,
     )
-    reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True, default=None)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     is_current: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default=text("true")
     )
@@ -109,6 +114,7 @@ class MentorThresholdConfig(Base):
         DateTime(timezone=True),
         nullable=False,
         server_default=text("NOW()"),
+        init=False,
     )
 
 
@@ -122,8 +128,8 @@ class Holiday(Base):
     type: Mapped[str] = mapped_column(
         String(50), nullable=False, default="NATIONAL", server_default=text("'NATIONAL'")
     )
-    source: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, default=None)
-    created_by: Mapped[Optional[UUID]] = mapped_column(
+    source: Mapped[str | None] = mapped_column(String(50), nullable=True, default=None)
+    created_by: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
@@ -133,6 +139,7 @@ class Holiday(Base):
         DateTime(timezone=True),
         nullable=False,
         server_default=text("NOW()"),
+        init=False,
     )
 
 
@@ -148,6 +155,19 @@ class NotificationTemplate(Base):
         DateTime(timezone=True),
         nullable=False,
         server_default=text("NOW()"),
+        init=False,
+    )
+    updated_by: Mapped[UUID | None] = mapped_column(
+        PgUUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        default=None,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("NOW()"),
+        init=False,
     )
 
 
@@ -163,10 +183,10 @@ class College(Base):
     aliases: Mapped[list[str]] = mapped_column(
         JSONB, nullable=False, default_factory=list, server_default=text("'[]'::jsonb")
     )
-    location_state: Mapped[Optional[str]] = mapped_column(
+    location_state: Mapped[str | None] = mapped_column(
         String(100), nullable=True, default=None
     )
-    type: Mapped[Optional[str]] = mapped_column(String(50), nullable=True, default=None)
+    type: Mapped[str | None] = mapped_column(String(50), nullable=True, default=None)
     is_verified: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default=text("true")
     )
@@ -174,11 +194,13 @@ class College(Base):
         DateTime(timezone=True),
         nullable=False,
         server_default=text("NOW()"),
+        init=False,
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         server_default=text("NOW()"),
+        init=False,
     )
 
 
@@ -198,7 +220,7 @@ class Document(Base):
     mime_type: Mapped[str] = mapped_column(String(100), nullable=False)
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
     sha256_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    uploaded_by: Mapped[Optional[UUID]] = mapped_column(
+    uploaded_by: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
@@ -208,6 +230,7 @@ class Document(Base):
         DateTime(timezone=True),
         nullable=False,
         server_default=text("NOW()"),
+        init=False,
     )
     is_archived: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false")
@@ -215,16 +238,16 @@ class Document(Base):
     is_recalled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false")
     )
-    recalled_at: Mapped[Optional[datetime]] = mapped_column(
+    recalled_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None
     )
-    recalled_by: Mapped[Optional[UUID]] = mapped_column(
+    recalled_by: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
         default=None,
     )
-    retention_delete_at: Mapped[Optional[date]] = mapped_column(
+    retention_delete_at: Mapped[date | None] = mapped_column(
         Date, nullable=True, default=None
     )
 
@@ -243,7 +266,7 @@ class Referral(Base):
         ForeignKey("users.id", ondelete="RESTRICT"),
         nullable=False,
     )
-    mentor_id: Mapped[Optional[UUID]] = mapped_column(
+    mentor_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("users.id", ondelete="RESTRICT"),
         nullable=True,
@@ -252,7 +275,7 @@ class Referral(Base):
 
     candidate_name: Mapped[str] = mapped_column(String(255), nullable=False)
     candidate_email: Mapped[str] = mapped_column(String(255), nullable=False)
-    candidate_phone: Mapped[Optional[str]] = mapped_column(
+    candidate_phone: Mapped[str | None] = mapped_column(
         String(20), nullable=True, default=None
     )
     college_id: Mapped[UUID] = mapped_column(
@@ -268,23 +291,23 @@ class Referral(Base):
     candidate_pan_encrypted: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     candidate_pan_masked: Mapped[str] = mapped_column(String(20), nullable=False)
 
-    project_title: Mapped[Optional[str]] = mapped_column(
+    project_title: Mapped[str | None] = mapped_column(
         String(255), nullable=True, default=None
     )
-    project_overview: Mapped[Optional[str]] = mapped_column(Text, nullable=True, default=None)
-    joining_location: Mapped[Optional[str]] = mapped_column(
+    project_overview: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    joining_location: Mapped[str | None] = mapped_column(
         String(255), nullable=True, default=None
     )
-    internship_start_date: Mapped[Optional[date]] = mapped_column(
+    internship_start_date: Mapped[date | None] = mapped_column(
         Date, nullable=True, default=None
     )
-    internship_end_date: Mapped[Optional[date]] = mapped_column(
+    internship_end_date: Mapped[date | None] = mapped_column(
         Date, nullable=True, default=None
     )
-    relationship_declaration: Mapped[Optional[str]] = mapped_column(
+    relationship_declaration: Mapped[str | None] = mapped_column(
         String(50), nullable=True, default=None
     )
-    relationship_declaration_detail: Mapped[Optional[str]] = mapped_column(
+    relationship_declaration_detail: Mapped[str | None] = mapped_column(
         Text, nullable=True, default=None
     )
     unpaid_consent: Mapped[bool] = mapped_column(
@@ -304,72 +327,73 @@ class Referral(Base):
         DateTime(timezone=True),
         nullable=False,
         server_default=text("NOW()"),
+        init=False,
     )
     mentor_attempt_count: Mapped[int] = mapped_column(
         SmallInteger, nullable=False, default=0, server_default=text("0")
     )
-    resume_document_id: Mapped[Optional[UUID]] = mapped_column(
+    resume_document_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("documents.id", ondelete="SET NULL"),
         nullable=True,
         default=None,
     )
-    submitted_at: Mapped[Optional[datetime]] = mapped_column(
+    submitted_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None
     )
-    approved_at: Mapped[Optional[datetime]] = mapped_column(
+    approved_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None
     )
-    approved_by: Mapped[Optional[UUID]] = mapped_column(
+    approved_by: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
         default=None,
     )
-    approved_by_label: Mapped[Optional[str]] = mapped_column(
+    approved_by_label: Mapped[str | None] = mapped_column(
         String(50), nullable=True, default=None
     )
-    rejected_at: Mapped[Optional[datetime]] = mapped_column(
+    rejected_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None
     )
-    rejected_by: Mapped[Optional[UUID]] = mapped_column(
+    rejected_by: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
         default=None,
     )
-    rejection_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True, default=None)
+    rejection_reason: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
 
     # Cooling-period bookkeeping.
-    cooling_period_months: Mapped[Optional[int]] = mapped_column(
+    cooling_period_months: Mapped[int | None] = mapped_column(
         SmallInteger, nullable=True, default=None
     )
-    cooling_period_start_at: Mapped[Optional[datetime]] = mapped_column(
+    cooling_period_start_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None
     )
-    cooling_period_end_at: Mapped[Optional[datetime]] = mapped_column(
+    cooling_period_end_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None
     )
-    cooling_triggered_by: Mapped[Optional[str]] = mapped_column(
+    cooling_triggered_by: Mapped[str | None] = mapped_column(
         String(50), nullable=True, default=None
     )
-    cooling_override_at: Mapped[Optional[datetime]] = mapped_column(
+    cooling_override_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None
     )
-    cooling_override_by: Mapped[Optional[UUID]] = mapped_column(
+    cooling_override_by: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
         default=None,
     )
-    cooling_override_reason: Mapped[Optional[str]] = mapped_column(
+    cooling_override_reason: Mapped[str | None] = mapped_column(
         Text, nullable=True, default=None
     )
 
-    reminder_7d_sent_at: Mapped[Optional[datetime]] = mapped_column(
+    reminder_7d_sent_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None
     )
-    reminder_expiry_sent_at: Mapped[Optional[datetime]] = mapped_column(
+    reminder_expiry_sent_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None
     )
 
@@ -377,11 +401,13 @@ class Referral(Base):
         DateTime(timezone=True),
         nullable=False,
         server_default=text("NOW()"),
+        init=False,
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         server_default=text("NOW()"),
+        init=False,
     )
 
 
@@ -396,7 +422,7 @@ class CoolingPeriodOverride(Base):
         ForeignKey("referrals.id", ondelete="CASCADE"),
         nullable=False,
     )
-    new_referral_id: Mapped[Optional[UUID]] = mapped_column(
+    new_referral_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("referrals.id", ondelete="SET NULL"),
         nullable=True,
@@ -408,6 +434,7 @@ class CoolingPeriodOverride(Base):
         DateTime(timezone=True),
         nullable=False,
         server_default=text("NOW()"),
+        init=False,
     )
     overridden_by: Mapped[UUID] = mapped_column(
         PgUUID(as_uuid=True),
@@ -431,7 +458,7 @@ class ReferralStageHistory(Base):
         ForeignKey("referrals.id", ondelete="CASCADE"),
         nullable=False,
     )
-    from_status: Mapped[Optional[str]] = mapped_column(
+    from_status: Mapped[str | None] = mapped_column(
         String(50), nullable=True, default=None
     )
     to_status: Mapped[str] = mapped_column(String(50), nullable=False)
@@ -439,17 +466,18 @@ class ReferralStageHistory(Base):
         DateTime(timezone=True),
         nullable=False,
         server_default=text("NOW()"),
+        init=False,
     )
-    actor_id: Mapped[Optional[UUID]] = mapped_column(
+    actor_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
         default=None,
     )
-    actor_role: Mapped[Optional[str]] = mapped_column(
+    actor_role: Mapped[str | None] = mapped_column(
         String(50), nullable=True, default=None
     )
-    reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True, default=None)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     payload: Mapped[dict[str, Any]] = mapped_column(
         JSONB, nullable=False, default_factory=dict, server_default=text("'{}'::jsonb")
     )
@@ -462,12 +490,13 @@ class StageDurationStat(Base):
     sample_count: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default=text("0")
     )
-    avg_hours: Mapped[Optional[float]] = mapped_column(Float, nullable=True, default=None)
-    p95_hours: Mapped[Optional[float]] = mapped_column(Float, nullable=True, default=None)
+    avg_hours: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+    p95_hours: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
     last_updated: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         server_default=text("NOW()"),
+        init=False,
     )
 
 
@@ -498,30 +527,31 @@ class MentorAssignment(Base):
         DateTime(timezone=True),
         nullable=False,
         server_default=text("NOW()"),
+        init=False,
     )
     timeout_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    responded_at: Mapped[Optional[datetime]] = mapped_column(
+    responded_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None
     )
-    rejection_reason: Mapped[Optional[str]] = mapped_column(
+    rejection_reason: Mapped[str | None] = mapped_column(
         Text, nullable=True, default=None
     )
-    reassigned_to: Mapped[Optional[UUID]] = mapped_column(
+    reassigned_to: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
         default=None,
     )
-    reassigned_at: Mapped[Optional[datetime]] = mapped_column(
+    reassigned_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None
     )
-    reassigned_by: Mapped[Optional[UUID]] = mapped_column(
+    reassigned_by: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
         default=None,
     )
-    reassign_reason: Mapped[Optional[str]] = mapped_column(
+    reassign_reason: Mapped[str | None] = mapped_column(
         Text, nullable=True, default=None
     )
 
@@ -538,32 +568,33 @@ class AiParseResult(Base):
     ai_touchpoint: Mapped[str] = mapped_column(String(50), nullable=False)
     model_version: Mapped[str] = mapped_column(String(100), nullable=False)
     raw_output: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    referral_id: Mapped[Optional[UUID]] = mapped_column(
+    referral_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("referrals.id", ondelete="CASCADE"),
         nullable=True,
         default=None,
     )
-    azure_openai_request_id: Mapped[Optional[str]] = mapped_column(
+    azure_openai_request_id: Mapped[str | None] = mapped_column(
         String(255), nullable=True, default=None
     )
     parsed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         server_default=text("NOW()"),
+        init=False,
     )
-    confidence_scores: Mapped[Optional[dict[str, Any]]] = mapped_column(
+    confidence_scores: Mapped[dict[str, Any] | None] = mapped_column(
         JSONB, nullable=True, default=None
     )
     human_overrides: Mapped[list[Any]] = mapped_column(
         JSONB, nullable=False, default_factory=list, server_default=text("'[]'::jsonb")
     )
-    tokens_used: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=None)
-    latency_ms: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, default=None)
+    tokens_used: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True, default=None)
     succeeded: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default=text("true")
     )
-    degradation_reason: Mapped[Optional[str]] = mapped_column(
+    degradation_reason: Mapped[str | None] = mapped_column(
         String(100), nullable=True, default=None
     )
 
@@ -584,11 +615,12 @@ class RiskProfile(Base):
     factors: Mapped[list[Any]] = mapped_column(
         JSONB, nullable=False, default_factory=list, server_default=text("'[]'::jsonb")
     )
-    narrative: Mapped[Optional[str]] = mapped_column(Text, nullable=True, default=None)
+    narrative: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     computed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         server_default=text("NOW()"),
+        init=False,
     )
 
 
@@ -601,7 +633,7 @@ class DuplicateCheckResult(Base):
     match_type: Mapped[str] = mapped_column(String(50), nullable=False)
     similarity_score: Mapped[float] = mapped_column(Float, nullable=False)
     recommendation: Mapped[str] = mapped_column(String(20), nullable=False)
-    referral_id: Mapped[Optional[UUID]] = mapped_column(
+    referral_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("referrals.id", ondelete="CASCADE"),
         nullable=True,
@@ -610,7 +642,7 @@ class DuplicateCheckResult(Base):
     match_reasons: Mapped[list[Any]] = mapped_column(
         JSONB, nullable=False, default_factory=list, server_default=text("'[]'::jsonb")
     )
-    matched_referral_id: Mapped[Optional[UUID]] = mapped_column(
+    matched_referral_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("referrals.id", ondelete="SET NULL"),
         nullable=True,
@@ -620,6 +652,7 @@ class DuplicateCheckResult(Base):
         DateTime(timezone=True),
         nullable=False,
         server_default=text("NOW()"),
+        init=False,
     )
 
 
@@ -631,39 +664,40 @@ class AiAutoAction(Base):
     )
     action_type: Mapped[str] = mapped_column(String(50), nullable=False)
     decision: Mapped[str] = mapped_column(String(50), nullable=False)
-    referral_id: Mapped[Optional[UUID]] = mapped_column(
+    referral_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("referrals.id", ondelete="CASCADE"),
         nullable=True,
         default=None,
     )
-    intern_id: Mapped[Optional[UUID]] = mapped_column(
+    intern_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True), nullable=True, default=None
     )
-    conditions_met: Mapped[Optional[list[Any]]] = mapped_column(
+    conditions_met: Mapped[list[Any] | None] = mapped_column(
         JSONB, nullable=True, default=None
     )
-    flags: Mapped[Optional[list[Any]]] = mapped_column(
+    flags: Mapped[list[Any] | None] = mapped_column(
         JSONB, nullable=True, default=None
     )
-    hr_recommendation: Mapped[Optional[str]] = mapped_column(
+    hr_recommendation: Mapped[str | None] = mapped_column(
         String(50), nullable=True, default=None
     )
     executed_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         server_default=text("NOW()"),
+        init=False,
     )
-    recalled_at: Mapped[Optional[datetime]] = mapped_column(
+    recalled_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None
     )
-    recalled_by: Mapped[Optional[UUID]] = mapped_column(
+    recalled_by: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
         default=None,
     )
-    recall_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True, default=None)
+    recall_reason: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -679,13 +713,13 @@ class Notification(Base):
     recipient_email: Mapped[str] = mapped_column(String(255), nullable=False)
     subject: Mapped[str] = mapped_column(String(500), nullable=False)
     body_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
-    referral_id: Mapped[Optional[UUID]] = mapped_column(
+    referral_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("referrals.id", ondelete="SET NULL"),
         nullable=True,
         default=None,
     )
-    gmail_message_id: Mapped[Optional[str]] = mapped_column(
+    gmail_message_id: Mapped[str | None] = mapped_column(
         String(255), nullable=True, default=None
     )
     status: Mapped[str] = mapped_column(
@@ -695,18 +729,19 @@ class Notification(Base):
         DateTime(timezone=True),
         nullable=False,
         server_default=text("NOW()"),
+        init=False,
     )
-    sent_at: Mapped[Optional[datetime]] = mapped_column(
+    sent_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None
     )
-    delivery_status: Mapped[Optional[str]] = mapped_column(
+    delivery_status: Mapped[str | None] = mapped_column(
         String(50), nullable=True, default=None
     )
-    bounce_reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True, default=None)
+    bounce_reason: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
     retry_count: Mapped[int] = mapped_column(
         SmallInteger, nullable=False, default=0, server_default=text("0")
     )
-    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True, default=None)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
 
 
 class Task(Base):
@@ -732,37 +767,37 @@ class Task(Base):
     sla_deadline: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False
     )
-    referral_id: Mapped[Optional[UUID]] = mapped_column(
+    referral_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("referrals.id", ondelete="CASCADE"),
         nullable=True,
         default=None,
     )
-    intern_id: Mapped[Optional[UUID]] = mapped_column(
+    intern_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True), nullable=True, default=None
     )
     assigned_by_ai: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false")
     )
-    ai_routing_reason: Mapped[Optional[str]] = mapped_column(
+    ai_routing_reason: Mapped[str | None] = mapped_column(
         Text, nullable=True, default=None
     )
     status: Mapped[str] = mapped_column(
         String(20), nullable=False, default="PENDING", server_default=text("'PENDING'")
     )
-    warned_at: Mapped[Optional[datetime]] = mapped_column(
+    warned_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None
     )
-    escalated_at: Mapped[Optional[datetime]] = mapped_column(
+    escalated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None
     )
-    completed_at: Mapped[Optional[datetime]] = mapped_column(
+    completed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None
     )
-    completion_notes: Mapped[Optional[str]] = mapped_column(
+    completion_notes: Mapped[str | None] = mapped_column(
         Text, nullable=True, default=None
     )
-    completed_by: Mapped[Optional[UUID]] = mapped_column(
+    completed_by: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
@@ -772,11 +807,13 @@ class Task(Base):
         DateTime(timezone=True),
         nullable=False,
         server_default=text("NOW()"),
+        init=False,
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         server_default=text("NOW()"),
+        init=False,
     )
 
 
@@ -790,9 +827,9 @@ class ConfigChangeHistory(Base):
     config_key: Mapped[str] = mapped_column(String(100), nullable=False)
     previous_value: Mapped[str] = mapped_column(String(50), nullable=False)
     new_value: Mapped[str] = mapped_column(String(50), nullable=False)
-    unit: Mapped[Optional[str]] = mapped_column(String(20), nullable=True, default=None)
-    reason: Mapped[Optional[str]] = mapped_column(Text, nullable=True, default=None)
-    changed_by: Mapped[Optional[UUID]] = mapped_column(
+    unit: Mapped[str | None] = mapped_column(String(20), nullable=True, default=None)
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True, default=None)
+    changed_by: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
@@ -802,11 +839,13 @@ class ConfigChangeHistory(Base):
         DateTime(timezone=True),
         nullable=False,
         server_default=text("NOW()"),
+        init=False,
     )
     effective_from: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         server_default=text("NOW()"),
+        init=False,
     )
     applies_to: Mapped[str] = mapped_column(
         String(50),
@@ -814,9 +853,9 @@ class ConfigChangeHistory(Base):
         default="NEW_REFERRALS_ONLY",
         server_default=text("'NEW_REFERRALS_ONLY'"),
     )
-    active_referrals_count: Mapped[Optional[int]] = mapped_column(
+    active_referrals_count: Mapped[int | None] = mapped_column(
         Integer, nullable=True, default=None
     )
-    active_mentors_affected: Mapped[Optional[int]] = mapped_column(
+    active_mentors_affected: Mapped[int | None] = mapped_column(
         Integer, nullable=True, default=None
     )

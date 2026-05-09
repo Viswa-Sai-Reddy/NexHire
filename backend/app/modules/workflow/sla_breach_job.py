@@ -6,7 +6,7 @@ and writes audit events. Notification fan-out is left to S6.x extensions.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from sqlalchemy import select
 
@@ -31,7 +31,7 @@ logger = logging.getLogger("nexhire.workflow.sla_breach")
 async def scan_sla_breaches() -> None:
     factory = get_sessionmaker()
     async with factory() as session, session.begin():
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         rows = (
             await session.execute(
                 select(Task).where(

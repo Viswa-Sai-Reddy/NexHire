@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% block content %}
+  <h1 style="margin:0 0 16px;font-size:24px;font-weight:600;line-height:1.2;color:#0f172a;">
+    Internship Non-Disclosure Agreement
+  </h1>
+  <p style="margin:0 0 12px;font-size:13px;color:#64748b;">
+    Version {{ template_version | default("v1") }}
+    · Between <strong>NexHire</strong> ("the Company") and
+    <strong>{{ candidate_name }}</strong> ("the Intern").
+  </p>
+
+  <h2 style="margin:24px 0 8px;font-size:16px;font-weight:600;color:#0f172a;">
+    1. Confidential information
+  </h2>
+  <p style="margin:0 0 12px;font-size:14px;line-height:1.6;color:#334155;">
+    During the internship, the Intern will be exposed to non-public business
+    information including but not limited to source code, customer data,
+    product roadmaps, financial information, and trade secrets ("Confidential
+    Information"). The Intern agrees to keep all Confidential Information
+    strictly confidential.
+  </p>
+
+  <h2 style="margin:24px 0 8px;font-size:16px;font-weight:600;color:#0f172a;">
+    2. Obligations of the Intern
+  </h2>
+  <ul style="margin:0 0 12px 18px;padding:0;font-size:14px;line-height:1.6;color:#334155;">
+    <li>Use Confidential Information solely for the purpose of the internship.</li>
+    <li>Not disclose Confidential Information to any third party.</li>
+    <li>Not copy, transmit, or store Confidential Information on personal devices or accounts.</li>
+    <li>Return or destroy all Confidential Information upon termination of the internship.</li>
+  </ul>
+
+  <h2 style="margin:24px 0 8px;font-size:16px;font-weight:600;color:#0f172a;">
+    3. Intellectual property
+  </h2>
+  <p style="margin:0 0 12px;font-size:14px;line-height:1.6;color:#334155;">
+    All work product, inventions, and materials created by the Intern in the
+    course of the internship are the sole and exclusive property of the
+    Company. The Intern hereby assigns all right, title, and interest in such
+    work to the Company.
+  </p>
+
+  <h2 style="margin:24px 0 8px;font-size:16px;font-weight:600;color:#0f172a;">
+    4. Duration
+  </h2>
+  <p style="margin:0 0 12px;font-size:14px;line-height:1.6;color:#334155;">
+    This agreement remains in effect during the internship and for three (3)
+    years after its end. Trade secrets remain protected for so long as they
+    qualify as such under applicable law.
+  </p>
+
+  <h2 style="margin:24px 0 8px;font-size:16px;font-weight:600;color:#0f172a;">
+    5. Remedies
+  </h2>
+  <p style="margin:0 0 12px;font-size:14px;line-height:1.6;color:#334155;">
+    The Intern acknowledges that breach of this agreement will cause
+    irreparable harm to the Company for which monetary damages may be
+    inadequate, and that the Company is entitled to injunctive relief in
+    addition to any other remedies available at law.
+  </p>
+
+  <h2 style="margin:24px 0 8px;font-size:16px;font-weight:600;color:#0f172a;">
+    6. Acceptance
+  </h2>
+  <p style="margin:0 0 12px;font-size:14px;line-height:1.6;color:#334155;">
+    By clicking "I have read and agree" and typing the Intern's full legal
+    name on the NexHire portal, the Intern accepts and is bound by the terms
+    of this agreement. The acceptance timestamp, IP address, browser
+    fingerprint, and cryptographic hash of this agreement text are recorded
+    by the Company as evidence of execution.
+  </p>
+{% endblock %}
+
+{% block footer %}
+  <br />
+  This is a placeholder NDA template. Program Owners can edit the wording via
+  the notification template management endpoints; the version hash auto-updates.
+{% endblock %}

@@ -1,4 +1,13 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link, useNavigate } from "react-router-dom";
+import {
+  AlertCircle,
+  ArrowLeft,
+  ArrowRight,
+  CheckCircle2,
+  Loader2,
+  Sparkles,
+} from "lucide-react";
 
 import { ConfidenceBadge } from "@/shared/components/ConfidenceBadge";
 import { CollegeCombobox } from "@/modules/referral/components/CollegeCombobox";
@@ -6,6 +15,7 @@ import { MentorPicker } from "@/modules/referral/components/MentorPicker";
 import { PanField } from "@/modules/referral/components/PanField";
 import { ResumeUploader } from "@/modules/referral/components/ResumeUploader";
 import { Stepper } from "@/modules/referral/components/Stepper";
+import { analyzeUploadedResume, searchColleges } from "@/modules/referral/api";
 import { useCollegeCap, useSubmitReferral } from "@/modules/referral/hooks";
 import { NexHireApiError } from "@/lib/axios";
 import type {
@@ -14,6 +24,15 @@ import type {
   ReferralSubmitRequest,
   ResumePrefillResponse,
 } from "@/modules/referral/types";
+import {
+  Badge,
+  Button,
+  Card,
+  CardContent,
+  Input,
+  Textarea,
+} from "@/shared/components/ui";
+import { cn } from "@/lib/utils";
 
 const STEPS = [
   { key: "candidate", label: "Candidate Details" },
@@ -23,10 +42,17 @@ const STEPS = [
   { key: "review", label: "Review & Submit" },
 ];
 
-const RELATIONSHIP_OPTIONS = ["None", "Family", "Friend", "Acquaintance", "Other"];
+const RELATIONSHIP_OPTIONS = [
+  "None",
+  "Family",
+  "Friend",
+  "Acquaintance",
+  "Other",
+];
+
+type AiStatus = "idle" | "running" | "done" | "failed";
 
 interface FormState {
-  // Step 1
   candidate_name: string;
   candidate_email: string;
   candidate_phone: string;
@@ -37,16 +63,13 @@ interface FormState {
   resume_document_id: string | null;
   resumePrefill: ResumePrefillResponse | null;
 
-  // Step 2
   unpaid_consent: boolean;
   inperson_ready: boolean;
   relationship_declaration: string;
   relationship_declaration_detail: string;
 
-  // Step 3
   mentor_id: string | null;
 
-  // Step 4
   project_title: string;
   project_overview: string;
   joining_location: string;
@@ -82,14 +105,17 @@ export function ReferralFormPage() {
   const [panVerdict, setPanVerdict] = useState<PanVerdict | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitSuccess, setSubmitSuccess] = useState<string | null>(null);
+  const [attemptedSteps, setAttemptedSteps] = useState<Set<number>>(new Set());
+  const [aiStatus, setAiStatus] = useState<AiStatus>("idle");
 
   const submit = useSubmitReferral();
   const collegeCap = useCollegeCap(state.college?.id ?? null);
+  const navigate = useNavigate();
 
   const update = <K extends keyof FormState>(key: K, value: FormState[K]) =>
     setState((prev) => ({ ...prev, [key]: value }));
 
-  const onResumeParsed = (result: ResumePrefillResponse) => {
+  const applyResumePrefill = (result: ResumePrefillResponse) => {
     setState((prev) => ({
       ...prev,
       resumePrefill: result,
@@ -103,6 +129,36 @@ export function ReferralFormPage() {
       candidate_graduation_year:
         result.candidate_graduation_year ?? prev.candidate_graduation_year,
     }));
+
+    if (result.college_name) {
+      void (async () => {
+        try {
+          const matches = await searchColleges(result.college_name as string);
+          const first = matches[0];
+          if (first !== undefined) {
+            setState((prev) =>
+              prev.college === null ? { ...prev, college: first } : prev,
+            );
+          }
+        } catch {
+          // Best-effort.
+        }
+      })();
+    }
+  };
+
+  const onResumeParsed = (result: ResumePrefillResponse) => {
+    applyResumePrefill(result);
+    setAiStatus("running");
+    void (async () => {
+      try {
+        const enriched = await analyzeUploadedResume(result.document_id);
+        applyResumePrefill(enriched);
+        setAiStatus("done");
+      } catch {
+        setAiStatus("failed");
+      }
+    })();
   };
 
   const completed = useMemo(() => {
@@ -112,7 +168,13 @@ export function ReferralFormPage() {
   }, [stepIndex]);
 
   const stepValid = useMemo(
-    () => isStepValid(stepIndex, state, panVerdict, collegeCap.data?.can_submit ?? true),
+    () =>
+      isStepValid(
+        stepIndex,
+        state,
+        panVerdict,
+        collegeCap.data?.can_submit ?? true,
+      ),
     [stepIndex, state, panVerdict, collegeCap.data],
   );
 
@@ -122,13 +184,16 @@ export function ReferralFormPage() {
     try {
       const body = toSubmitRequest(state);
       const result = await submit.mutateAsync(body);
-      setSubmitSuccess(
-        `Referral submitted (#${result.referral_id.slice(0, 8)}). ` +
-          `Mentor will be notified.`,
-      );
       setState(INITIAL_STATE);
       setStepIndex(0);
       setPanVerdict(null);
+      navigate("/referrals/mine", {
+        replace: true,
+        state: {
+          submittedReferralId: result.referral_id,
+          flash: `Referral submitted (#${result.referral_id.slice(0, 8)}). Mentor will be notified.`,
+        },
+      });
     } catch (err) {
       if (err instanceof NexHireApiError) {
         setSubmitError(err.message);
@@ -139,66 +204,99 @@ export function ReferralFormPage() {
   };
 
   return (
-    <div className="container py-10">
-      <header className="mb-8">
-        <h1 className="text-2xl font-semibold">Submit Internship Referral</h1>
-        <p className="mt-1 text-sm text-muted-foreground">
-          All referrals must be submitted through this portal. Fields marked *
-          are mandatory.
-        </p>
+    <div className="mx-auto max-w-5xl px-4 py-8 sm:px-6 lg:px-8 lg:py-10">
+      <header className="mb-8 flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">
+            Submit Internship Referral
+          </h1>
+          <p className="mt-1 text-sm text-muted-foreground">
+            All referrals must be submitted through this portal. Fields marked
+            <span className="text-destructive"> *</span> are mandatory.
+          </p>
+        </div>
+        <Button asChild variant="outline" size="sm">
+          <Link to="/referrals/mine">View my referrals</Link>
+        </Button>
       </header>
 
-      <div className="mb-8 rounded-xl border border-border bg-card p-6 shadow-sm">
-        <Stepper
-          steps={STEPS}
-          currentIndex={stepIndex}
-          completedIndexes={completed}
-        />
-      </div>
+      <Card className="mb-6">
+        <CardContent className="p-5 sm:p-6">
+          <Stepper
+            steps={STEPS}
+            currentIndex={stepIndex}
+            completedIndexes={completed}
+          />
+        </CardContent>
+      </Card>
 
-      <section className="rounded-xl border border-border bg-card p-6 shadow-sm">
-        {stepIndex === 0 && (
-          <Step1Candidate
-            state={state}
-            update={update}
-            onResumeParsed={onResumeParsed}
-            onPanVerdict={setPanVerdict}
-            collegeCap={collegeCap.data}
-          />
-        )}
-        {stepIndex === 1 && <Step2Eligibility state={state} update={update} />}
-        {stepIndex === 2 && <Step3Mentor state={state} update={update} />}
-        {stepIndex === 3 && <Step4Internship state={state} update={update} />}
-        {stepIndex === 4 && (
-          <Step5Review
-            state={state}
-            onBack={() => setStepIndex(3)}
-            onSubmit={handleSubmit}
-            isSubmitting={submit.isPending}
-            error={submitError}
-            success={submitSuccess}
-          />
-        )}
-      </section>
+      <Card>
+        <CardContent className="p-6">
+          {stepIndex === 0 && (
+            <Step1Candidate
+              state={state}
+              update={update}
+              onResumeParsed={onResumeParsed}
+              onPanVerdict={setPanVerdict}
+              panVerdict={panVerdict}
+              collegeCap={collegeCap.data}
+              showErrors={attemptedSteps.has(0)}
+              aiStatus={aiStatus}
+            />
+          )}
+          {stepIndex === 1 && <Step2Eligibility state={state} update={update} />}
+          {stepIndex === 2 && <Step3Mentor state={state} update={update} />}
+          {stepIndex === 3 && (
+            <Step4Internship
+              state={state}
+              update={update}
+              showErrors={attemptedSteps.has(3)}
+            />
+          )}
+          {stepIndex === 4 && (
+            <Step5Review
+              state={state}
+              onBack={() => setStepIndex(3)}
+              onSubmit={() => {
+                void handleSubmit();
+              }}
+              isSubmitting={submit.isPending}
+              error={submitError}
+              success={submitSuccess}
+            />
+          )}
+        </CardContent>
+      </Card>
 
       {stepIndex < STEPS.length - 1 && (
         <div className="mt-6 flex items-center justify-between">
-          <button
+          <Button
             type="button"
+            variant="outline"
             onClick={() => setStepIndex((i) => Math.max(i - 1, 0))}
             disabled={stepIndex === 0}
-            className="rounded-md border border-border px-4 py-2 text-sm font-medium hover:bg-secondary disabled:opacity-50"
           >
-            ← Back
-          </button>
-          <button
+            <ArrowLeft className="h-4 w-4" aria-hidden />
+            Back
+          </Button>
+          <Button
             type="button"
-            onClick={() => setStepIndex((i) => Math.min(i + 1, STEPS.length - 1))}
-            disabled={!stepValid}
-            className="rounded-md bg-primary px-5 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-60"
+            onClick={() => {
+              if (stepValid) {
+                setStepIndex((i) => Math.min(i + 1, STEPS.length - 1));
+              } else {
+                setAttemptedSteps((s) => {
+                  if (s.has(stepIndex)) return s;
+                  const next = new Set(s);
+                  next.add(stepIndex);
+                  return next;
+                });
+              }
+            }}
           >
-            {stepIndex === STEPS.length - 2 ? "Review →" : "Next →"}
-          </button>
+            {stepIndex === STEPS.length - 2 ? "Review" : "Next"}
+            <ArrowRight className="h-4 w-4" aria-hidden />
+          </Button>
         </div>
       )}
     </div>
@@ -211,19 +309,88 @@ function Step1Candidate({
   update,
   onResumeParsed,
   onPanVerdict,
+  panVerdict,
   collegeCap,
+  showErrors,
+  aiStatus,
 }: {
   state: FormState;
   update: <K extends keyof FormState>(key: K, value: FormState[K]) => void;
   onResumeParsed: (r: ResumePrefillResponse) => void;
   onPanVerdict: (v: PanVerdict | null) => void;
+  panVerdict: PanVerdict | null;
   collegeCap: ReturnType<typeof useCollegeCap>["data"];
+  showErrors: boolean;
+  aiStatus: AiStatus;
 }) {
   const p = state.resumePrefill;
+  const aiBusy = aiStatus === "running";
+
+  const yearFlash = useFillFlash(state.candidate_year_of_study, aiStatus);
+  const gradYearFlash = useFillFlash(
+    state.candidate_graduation_year,
+    aiStatus,
+  );
+  const collegeFlash = useFillFlash(state.college, aiStatus);
+
+  const nameLen = state.candidate_name.trim().length;
+  const phoneLen = state.candidate_phone.trim().length;
+  const rawNameError =
+    nameLen === 0
+      ? "Full name is required."
+      : nameLen < 2
+        ? "Full name must be at least 2 characters."
+        : null;
+  const rawEmailError =
+    state.candidate_email.length === 0
+      ? "Email address is required."
+      : !/\S+@\S+\.\S+/.test(state.candidate_email)
+        ? "Enter a valid email address."
+        : null;
+  const rawPhoneError =
+    phoneLen === 0
+      ? "Phone number is required."
+      : phoneLen < 6
+        ? "Phone number must be at least 6 digits."
+        : null;
+  const rawCollegeError =
+    state.college === null ? "Select a college from the list." : null;
+  const rawYearError =
+    state.candidate_year_of_study === ""
+      ? "Select the candidate's current year of study."
+      : null;
+  const rawGradYearError =
+    typeof state.candidate_graduation_year !== "number"
+      ? "Expected graduation year is required."
+      : null;
+
+  const rawPanError =
+    state.candidate_pan.length === 0
+      ? "PAN card number is required."
+      : state.candidate_pan.length !== 10
+        ? "PAN must be exactly 10 characters (e.g. ABCDE1234F)."
+        : panVerdict === "HARD_BLOCK"
+          ? "This PAN is blocked from referrals (active duplicate). Please verify with HR."
+          : panVerdict === "COOLING_BLOCK"
+            ? "This candidate is in a cooling-off period. A new referral can be submitted later."
+            : panVerdict === null
+              ? "PAN check is still running — please wait a moment."
+              : null;
+
+  const nameError = showErrors ? rawNameError : null;
+  const emailError = showErrors ? rawEmailError : null;
+  const phoneError = showErrors ? rawPhoneError : null;
+  const collegeError = showErrors ? rawCollegeError : null;
+  const yearError = showErrors ? rawYearError : null;
+  const gradYearError = showErrors ? rawGradYearError : null;
+  const panError = showErrors ? rawPanError : null;
+
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-lg font-semibold">Candidate Details</h2>
+        <h2 className="text-lg font-semibold tracking-tight">
+          Candidate Details
+        </h2>
         <p className="mt-1 text-sm text-muted-foreground">
           Upload a resume for AI-assisted prefill, or enter details manually.
         </p>
@@ -231,48 +398,63 @@ function Step1Candidate({
 
       <ResumeUploader onParsed={onResumeParsed} />
 
+      <AiAnalysisBanner status={aiStatus} />
+
       <div className="grid gap-4 md:grid-cols-2">
         <Field
           label="Full Name *"
           confidence={p?.candidate_name_confidence ?? null}
+          error={nameError}
         >
-          <input
+          <Input
             type="text"
             value={state.candidate_name}
             onChange={(e) => update("candidate_name", e.target.value)}
             placeholder="Candidate full name"
-            className={inputClass(p?.candidate_name_confidence)}
+            className={confidenceTint(p?.candidate_name_confidence)}
           />
         </Field>
         <Field
           label="Email Address *"
           confidence={p?.candidate_email_confidence ?? null}
+          error={emailError}
         >
-          <input
+          <Input
             type="email"
             value={state.candidate_email}
             onChange={(e) => update("candidate_email", e.target.value)}
             placeholder="candidate@university.edu"
-            className={inputClass(p?.candidate_email_confidence)}
+            className={confidenceTint(p?.candidate_email_confidence)}
           />
         </Field>
         <Field
           label="Phone Number *"
           confidence={p?.candidate_phone_confidence ?? null}
+          error={phoneError}
         >
-          <input
+          <Input
             type="tel"
             value={state.candidate_phone}
             onChange={(e) => update("candidate_phone", e.target.value)}
             placeholder="+91 XXXXX XXXXX"
-            className={inputClass(p?.candidate_phone_confidence)}
+            className={confidenceTint(p?.candidate_phone_confidence)}
           />
         </Field>
-        <Field label="University / Institution *">
-          <CollegeCombobox
-            value={state.college}
-            onChange={(c) => update("college", c)}
-          />
+        <Field label="University / Institution *" error={collegeError}>
+          <div
+            className={cn(
+              "rounded-md transition-colors",
+              collegeFlash && "bg-stage-active/10",
+            )}
+          >
+            <CollegeCombobox
+              value={state.college}
+              onChange={(c) => update("college", c)}
+              placeholder={
+                aiBusy ? "AI analyzing…" : "Type college name (e.g. VIT)"
+              }
+            />
+          </div>
           {collegeCap && state.college && (
             <CollegeCapHint
               used={collegeCap.used}
@@ -285,18 +467,27 @@ function Step1Candidate({
         <Field
           label="Year of Study *"
           confidence={p?.candidate_year_of_study_confidence ?? null}
+          error={yearError}
         >
           <select
             value={state.candidate_year_of_study}
             onChange={(e) =>
               update(
                 "candidate_year_of_study",
-                e.target.value === "" ? "" : (Number(e.target.value) as 2 | 3 | 4),
+                e.target.value === ""
+                  ? ""
+                  : (Number(e.target.value) as 2 | 3 | 4),
               )
             }
-            className={inputClass(p?.candidate_year_of_study_confidence)}
+            className={cn(
+              selectClass,
+              confidenceTint(p?.candidate_year_of_study_confidence),
+              yearFlash && "bg-stage-active/10",
+            )}
           >
-            <option value="">Select year</option>
+            <option value="">
+              {aiBusy ? "Select year (AI analyzing…)" : "Select year"}
+            </option>
             <option value={2}>2nd Year</option>
             <option value={3}>3rd Year</option>
             <option value={4}>4th Year</option>
@@ -305,8 +496,9 @@ function Step1Candidate({
         <Field
           label="Expected Graduation Year *"
           confidence={p?.candidate_graduation_year_confidence ?? null}
+          error={gradYearError}
         >
-          <input
+          <Input
             type="number"
             min={2025}
             max={2035}
@@ -317,8 +509,11 @@ function Step1Candidate({
                 e.target.value === "" ? "" : Number(e.target.value),
               )
             }
-            placeholder="e.g. 2027"
-            className={inputClass(p?.candidate_graduation_year_confidence)}
+            placeholder={aiBusy ? "AI analyzing…" : "e.g. 2027"}
+            className={cn(
+              confidenceTint(p?.candidate_graduation_year_confidence),
+              gradYearFlash && "bg-stage-active/10",
+            )}
           />
         </Field>
         <div className="md:col-span-2">
@@ -327,20 +522,22 @@ function Step1Candidate({
             onChange={(v) => update("candidate_pan", v)}
             onVerdictChange={onPanVerdict}
           />
+          {panError !== null && (
+            <p className="mt-1 text-xs text-destructive" role="alert">
+              {panError}
+            </p>
+          )}
         </div>
       </div>
 
       {p?.skills && p.skills.length > 0 && (
         <div>
           <h3 className="text-sm font-medium">Key Skills (AI-extracted)</h3>
-          <div className="mt-2 flex flex-wrap gap-2">
+          <div className="mt-2 flex flex-wrap gap-1.5">
             {p.skills.map((s) => (
-              <span
-                key={s}
-                className="rounded-full bg-secondary px-3 py-1 text-xs text-foreground"
-              >
+              <Badge key={s} variant="muted">
                 {s}
-              </span>
+              </Badge>
             ))}
           </div>
         </div>
@@ -360,7 +557,9 @@ function Step2Eligibility({
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-lg font-semibold">Eligibility Check</h2>
+        <h2 className="text-lg font-semibold tracking-tight">
+          Eligibility Check
+        </h2>
         <p className="mt-1 text-sm text-muted-foreground">
           Both consent boxes are required by NexHire policy.
         </p>
@@ -381,7 +580,7 @@ function Step2Eligibility({
         <select
           value={state.relationship_declaration}
           onChange={(e) => update("relationship_declaration", e.target.value)}
-          className={inputClass(null)}
+          className={selectClass}
         >
           {RELATIONSHIP_OPTIONS.map((opt) => (
             <option key={opt} value={opt}>
@@ -392,13 +591,12 @@ function Step2Eligibility({
       </Field>
       {state.relationship_declaration === "Other" && (
         <Field label="Please describe">
-          <input
+          <Input
             type="text"
             value={state.relationship_declaration_detail}
             onChange={(e) =>
               update("relationship_declaration_detail", e.target.value)
             }
-            className={inputClass(null)}
           />
         </Field>
       )}
@@ -418,7 +616,9 @@ function Step3Mentor({
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-lg font-semibold">Mentor Selection</h2>
+        <h2 className="text-lg font-semibold tracking-tight">
+          Mentor Selection
+        </h2>
         <p className="mt-1 text-sm text-muted-foreground">
           AI-2 ranks the top 3 mentors based on skill overlap, capacity,
           completion history, college familiarity, and response speed. Use
@@ -439,60 +639,108 @@ function Step3Mentor({
 function Step4Internship({
   state,
   update,
+  showErrors,
 }: {
   state: FormState;
   update: <K extends keyof FormState>(key: K, value: FormState[K]) => void;
+  showErrors: boolean;
 }) {
+  const titleLen = state.project_title.trim().length;
+  const locationLen = state.joining_location.trim().length;
+
+  const rawTitleError =
+    titleLen === 0
+      ? "Project title is required."
+      : titleLen < 3
+        ? "Project title must be at least 3 characters."
+        : null;
+  const rawLocationError =
+    locationLen === 0
+      ? "Joining location is required."
+      : locationLen < 2
+        ? "Joining location must be at least 2 characters."
+        : null;
+  const rawStartError = state.internship_start_date
+    ? null
+    : "Start date is required.";
+  const rawEndError = state.internship_end_date
+    ? null
+    : "End date is required.";
+
+  let rawDateRangeError: string | null = null;
+  if (state.internship_start_date && state.internship_end_date) {
+    const start = new Date(state.internship_start_date);
+    const end = new Date(state.internship_end_date);
+    const days = Math.round(
+      (end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24),
+    );
+    if (Number.isFinite(days)) {
+      if (days < 28) {
+        rawDateRangeError = `Duration is ${days} days — minimum is 28 days (4 weeks).`;
+      } else if (days > 182) {
+        rawDateRangeError = `Duration is ${days} days — maximum is 182 days (26 weeks).`;
+      }
+    }
+  }
+
+  const titleError = showErrors ? rawTitleError : null;
+  const locationError = showErrors ? rawLocationError : null;
+  const startError = showErrors ? rawStartError : null;
+  const endError = showErrors ? rawEndError : null;
+  const dateRangeError = showErrors ? rawDateRangeError : null;
+
   return (
     <div className="space-y-6">
       <div>
-        <h2 className="text-lg font-semibold">Internship Details</h2>
+        <h2 className="text-lg font-semibold tracking-tight">
+          Internship Details
+        </h2>
         <p className="mt-1 text-sm text-muted-foreground">
           Duration must be between 4 and 26 weeks.
         </p>
       </div>
-      <Field label="Project Title *">
-        <input
+      <Field
+        label="Project Title *"
+        error={titleError}
+        hint={titleError ? null : "At least 3 characters."}
+      >
+        <Input
           type="text"
           value={state.project_title}
           onChange={(e) => update("project_title", e.target.value)}
           maxLength={255}
-          className={inputClass(null)}
+          placeholder="e.g. Mobile checkout redesign"
         />
       </Field>
       <Field label="Project Overview">
-        <textarea
+        <Textarea
           value={state.project_overview}
           onChange={(e) => update("project_overview", e.target.value)}
           rows={3}
           maxLength={2000}
-          className={inputClass(null)}
         />
       </Field>
-      <Field label="Joining Location *">
-        <input
+      <Field label="Joining Location *" error={locationError}>
+        <Input
           type="text"
           value={state.joining_location}
           onChange={(e) => update("joining_location", e.target.value)}
           placeholder="Bangalore, IN"
-          className={inputClass(null)}
         />
       </Field>
       <div className="grid gap-4 md:grid-cols-2">
-        <Field label="Start Date *">
-          <input
+        <Field label="Start Date *" error={startError}>
+          <Input
             type="date"
             value={state.internship_start_date}
             onChange={(e) => update("internship_start_date", e.target.value)}
-            className={inputClass(null)}
           />
         </Field>
-        <Field label="End Date *">
-          <input
+        <Field label="End Date *" error={endError ?? dateRangeError}>
+          <Input
             type="date"
             value={state.internship_end_date}
             onChange={(e) => update("internship_end_date", e.target.value)}
-            className={inputClass(null)}
           />
         </Field>
       </div>
@@ -518,17 +766,29 @@ function Step5Review({
 }) {
   return (
     <div className="space-y-6">
-      <h2 className="text-lg font-semibold">Review & Submit</h2>
+      <h2 className="text-lg font-semibold tracking-tight">Review & Submit</h2>
 
-      <div className="grid gap-4 rounded-xl border border-border p-4 text-sm md:grid-cols-2">
+      <div className="grid gap-4 rounded-md border border-border/60 bg-secondary/30 p-4 text-sm md:grid-cols-2">
         <Pair label="Candidate" value={state.candidate_name} />
         <Pair label="Email" value={state.candidate_email} />
         <Pair label="Phone" value={state.candidate_phone} />
         <Pair label="PAN" value={maskedPan(state.candidate_pan)} />
-        <Pair label="College" value={state.college?.canonical_name ?? "—"} />
-        <Pair label="Year of Study" value={String(state.candidate_year_of_study)} />
-        <Pair label="Graduation Year" value={String(state.candidate_graduation_year)} />
-        <Pair label="Mentor selected" value={state.mentor_id ? "Yes" : "—"} />
+        <Pair
+          label="College"
+          value={state.college?.canonical_name ?? "—"}
+        />
+        <Pair
+          label="Year of Study"
+          value={String(state.candidate_year_of_study)}
+        />
+        <Pair
+          label="Graduation Year"
+          value={String(state.candidate_graduation_year)}
+        />
+        <Pair
+          label="Mentor selected"
+          value={state.mentor_id ? "Yes" : "—"}
+        />
         <Pair label="Project" value={state.project_title} />
         <Pair label="Location" value={state.joining_location} />
         <Pair
@@ -544,55 +804,70 @@ function Step5Review({
       </div>
 
       {error !== null && (
-        <p role="alert" className="rounded-md bg-destructive/10 px-3 py-2 text-sm text-destructive">
+        <p
+          role="alert"
+          className="flex items-start gap-2 rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive"
+        >
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
           {error}
         </p>
       )}
       {success !== null && (
-        <p className="rounded-md bg-emerald-50 px-3 py-2 text-sm text-emerald-800">
+        <p className="flex items-start gap-2 rounded-md border border-stage-active/30 bg-stage-active/10 px-3 py-2 text-sm text-stage-active">
+          <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
           {success}
         </p>
       )}
 
       <div className="flex items-center justify-between">
-        <button
+        <Button
           type="button"
+          variant="outline"
           onClick={onBack}
           disabled={isSubmitting}
-          className="rounded-md border border-border px-4 py-2 text-sm font-medium hover:bg-secondary disabled:opacity-50"
         >
-          ← Back
-        </button>
-        <button
-          type="button"
-          onClick={onSubmit}
-          disabled={isSubmitting}
-          className="rounded-md bg-primary px-6 py-2 text-sm font-medium text-primary-foreground hover:bg-primary/90 disabled:opacity-60"
-        >
+          <ArrowLeft className="h-4 w-4" aria-hidden />
+          Back
+        </Button>
+        <Button type="button" onClick={onSubmit} disabled={isSubmitting}>
           {isSubmitting ? "Submitting…" : "Submit Referral"}
-        </button>
+        </Button>
       </div>
     </div>
   );
 }
 
 /* ───────────── Helpers ───────────── */
+const selectClass =
+  "flex h-9 w-full rounded-md border border-border bg-card px-3 text-sm shadow-sm transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:cursor-not-allowed disabled:opacity-50";
+
 function Field({
   label,
   confidence,
+  error,
+  hint,
   children,
 }: {
   label: string;
   confidence?: number | null;
+  error?: string | null;
+  hint?: string | null;
   children: React.ReactNode;
 }) {
   return (
     <label className="block text-sm">
-      <div className="mb-1 flex items-center gap-2 font-medium">
+      <div className="mb-1.5 flex items-center gap-2 font-medium">
         {label}
         <ConfidenceBadge confidence={confidence ?? null} />
       </div>
       {children}
+      {error ? (
+        <p className="mt-1 text-xs text-destructive" role="alert">
+          {error}
+        </p>
+      ) : hint ? (
+        <p className="mt-1 text-xs text-muted-foreground">{hint}</p>
+      ) : null}
     </label>
   );
 }
@@ -612,7 +887,7 @@ function CheckboxRow({
         type="checkbox"
         checked={checked}
         onChange={(e) => onChange(e.target.checked)}
-        className="mt-1 h-4 w-4 rounded border-border text-primary focus:ring-primary"
+        className="mt-1 h-4 w-4 rounded border-border text-primary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
       />
       <span>{label}</span>
     </label>
@@ -639,14 +914,19 @@ function CollegeCapHint({
   }
   if (warning) {
     return (
-      <p className="mt-1 text-xs text-amber-700">
-        ⚠️ {used} of {limit} used. One more allowed from this college.
+      <p className="mt-1 flex items-center gap-1 text-xs text-stage-review">
+        <AlertCircle className="h-3 w-3" aria-hidden />
+        {used} of {limit} used. One more allowed from this college.
       </p>
     );
   }
   return (
-    <p role="alert" className="mt-1 text-xs text-destructive">
-      ⛔ Limit reached for this college ({used}/{limit}).
+    <p
+      role="alert"
+      className="mt-1 flex items-center gap-1 text-xs text-destructive"
+    >
+      <AlertCircle className="h-3 w-3" aria-hidden />
+      Limit reached for this college ({used}/{limit}).
     </p>
   );
 }
@@ -654,7 +934,7 @@ function CollegeCapHint({
 function Pair({ label, value }: { label: string; value: string }) {
   return (
     <div>
-      <p className="text-xs uppercase tracking-wide text-muted-foreground">
+      <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">
         {label}
       </p>
       <p className="mt-0.5 font-medium">{value || "—"}</p>
@@ -668,18 +948,89 @@ function maskedPan(pan: string): string {
   return `${cleaned.slice(0, 5)}****${cleaned.slice(9)}`;
 }
 
-function inputClass(confidence: number | null | undefined) {
+function confidenceTint(confidence: number | null | undefined): string {
   const tinted =
     confidence !== null &&
     confidence !== undefined &&
     confidence < 0.9 &&
     confidence > 0;
-  return [
-    "w-full rounded-md border bg-card px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-primary",
-    tinted
-      ? "border-amber-300 bg-amber-50/40"
-      : "border-border",
-  ].join(" ");
+  return tinted ? "border-stage-review/60 bg-stage-review/5" : "";
+}
+
+function AiAnalysisBanner({ status }: { status: AiStatus }) {
+  const [hideTerminal, setHideTerminal] = useState(false);
+
+  useEffect(() => {
+    if (status === "done" || status === "failed") {
+      setHideTerminal(false);
+      const ms = status === "done" ? 2000 : 4000;
+      const t = window.setTimeout(() => setHideTerminal(true), ms);
+      return () => window.clearTimeout(t);
+    }
+    return;
+  }, [status]);
+
+  if (status === "idle") return null;
+  if ((status === "done" || status === "failed") && hideTerminal) return null;
+
+  if (status === "running") {
+    return (
+      <div
+        role="status"
+        aria-live="polite"
+        className="flex items-center gap-2 rounded-md border border-stage-submitted/30 bg-stage-submitted/10 px-4 py-2 text-sm text-stage-submitted"
+      >
+        <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+        <span>
+          AI is analyzing skills, college, and graduation details — this can
+          take a few seconds.
+        </span>
+      </div>
+    );
+  }
+  if (status === "done") {
+    return (
+      <div
+        role="status"
+        className="flex items-center gap-2 rounded-md border border-stage-active/30 bg-stage-active/10 px-4 py-2 text-sm text-stage-active"
+      >
+        <Sparkles className="h-4 w-4" aria-hidden />
+        AI analysis complete.
+      </div>
+    );
+  }
+  return (
+    <div
+      role="alert"
+      className="flex items-center gap-2 rounded-md border border-stage-review/30 bg-stage-review/10 px-4 py-2 text-sm text-stage-review"
+    >
+      <AlertCircle className="h-4 w-4" aria-hidden />
+      AI analysis didn't complete — please fill these fields manually.
+    </div>
+  );
+}
+
+function useFillFlash(value: unknown, aiStatus: AiStatus): boolean {
+  const prevRef = useRef(value);
+  const [flash, setFlash] = useState(false);
+
+  useEffect(() => {
+    const wasEmpty =
+      prevRef.current === null ||
+      prevRef.current === undefined ||
+      prevRef.current === "";
+    const isFilled = value !== null && value !== undefined && value !== "";
+    if (wasEmpty && isFilled && aiStatus === "running") {
+      setFlash(true);
+      const t = window.setTimeout(() => setFlash(false), 700);
+      prevRef.current = value;
+      return () => window.clearTimeout(t);
+    }
+    prevRef.current = value;
+    return;
+  }, [value, aiStatus]);
+
+  return flash;
 }
 
 function isStepValid(
@@ -695,7 +1046,9 @@ function isStepValid(
         /\S+@\S+\.\S+/.test(s.candidate_email) &&
         s.candidate_phone.trim().length >= 6 &&
         s.candidate_pan.length === 10 &&
-        (panVerdict === "CLEAR" || panVerdict === "WARN" || panVerdict === "SOFT_BLOCK") &&
+        (panVerdict === "CLEAR" ||
+          panVerdict === "WARN" ||
+          panVerdict === "SOFT_BLOCK") &&
         s.college !== null &&
         collegeCanSubmit &&
         (s.candidate_year_of_study === 2 ||

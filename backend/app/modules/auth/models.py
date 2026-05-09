@@ -16,11 +16,11 @@ mentor email buttons).
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
 from uuid import UUID, uuid4
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Index, String, text
-from sqlalchemy.dialects.postgresql import INET, UUID as PgUUID
+from sqlalchemy.dialects.postgresql import INET, JSONB
+from sqlalchemy.dialects.postgresql import UUID as PgUUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.infrastructure.database import Base
@@ -34,7 +34,7 @@ class User(Base):
         primary_key=True,
         default_factory=uuid4,
     )
-    azure_oid: Mapped[Optional[str]] = mapped_column(
+    azure_oid: Mapped[str | None] = mapped_column(
         String(255), unique=True, nullable=True, default=None
     )
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
@@ -42,24 +42,37 @@ class User(Base):
     # Stored as VARCHAR so changing the enum doesn't require migrating
     # every users row. Validation is at the boundary (Pydantic).
     role: Mapped[str] = mapped_column(String(32), nullable=False)
+    # bcrypt hash of the user's login password. Empty string means
+    # password login is disabled for this row (e.g. seed placeholders).
+    password_hash: Mapped[str] = mapped_column(
+        String(255), nullable=False, default="", server_default=""
+    )
     can_mentor: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false")
     )
     is_active: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default=text("true")
     )
-    out_of_office_until: Mapped[Optional[datetime]] = mapped_column(
+    out_of_office_until: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None
+    )
+    skills: Mapped[list[str]] = mapped_column(
+        JSONB,
+        nullable=False,
+        default_factory=list,
+        server_default=text("'[]'::jsonb"),
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         server_default=text("NOW()"),
+        init=False,
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         server_default=text("NOW()"),
+        init=False,
     )
 
 
@@ -86,19 +99,20 @@ class Session(Base):
     )
     refresh_token_hash: Mapped[str] = mapped_column(String(255), nullable=False)
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    revoked_at: Mapped[Optional[datetime]] = mapped_column(
+    revoked_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None
     )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         server_default=text("NOW()"),
+        init=False,
     )
-    last_seen_at: Mapped[Optional[datetime]] = mapped_column(
+    last_seen_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None
     )
-    ip_address: Mapped[Optional[str]] = mapped_column(INET, nullable=True, default=None)
-    user_agent: Mapped[Optional[str]] = mapped_column(String(512), nullable=True, default=None)
+    ip_address: Mapped[str | None] = mapped_column(INET, nullable=True, default=None)
+    user_agent: Mapped[str | None] = mapped_column(String(512), nullable=True, default=None)
 
 
 Index("idx_sessions_user_active", Session.user_id, Session.revoked_at)
@@ -119,16 +133,16 @@ class ActionToken(Base):
     )
     token_hash: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
     action_type: Mapped[str] = mapped_column(String(50), nullable=False)
-    referral_id: Mapped[Optional[UUID]] = mapped_column(
+    referral_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         # FK to referrals(id) added by the S1 migration that creates the table.
         nullable=True,
         default=None,
     )
-    intern_id: Mapped[Optional[UUID]] = mapped_column(
+    intern_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True), nullable=True, default=None
     )
-    actor_user_id: Mapped[Optional[UUID]] = mapped_column(
+    actor_user_id: Mapped[UUID | None] = mapped_column(
         PgUUID(as_uuid=True),
         ForeignKey("users.id", ondelete="SET NULL"),
         nullable=True,
@@ -138,14 +152,15 @@ class ActionToken(Base):
     used: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=False, server_default=text("false")
     )
-    used_at: Mapped[Optional[datetime]] = mapped_column(
+    used_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True, default=None
     )
-    ip_address: Mapped[Optional[str]] = mapped_column(INET, nullable=True, default=None)
+    ip_address: Mapped[str | None] = mapped_column(INET, nullable=True, default=None)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
         server_default=text("NOW()"),
+        init=False,
     )
 
 

@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block content %}
+  <h1 style="margin:0 0 16px;font-size:24px;font-weight:600;line-height:1.2;color:#0f172a;">
+    Your internship referral is approved
+  </h1>
+  <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#0f172a;">
+    Hi {{ candidate_name }},
+  </p>
+  <p style="margin:0 0 16px;font-size:15px;line-height:1.6;color:#334155;">
+    Your mentor has accepted the assignment and your referral has been
+    approved. The next step is to complete your joining form so we can
+    issue your access and NDA.
+  </p>
+  <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:16px 0 24px;width:100%;border:1px solid #e2e8f0;border-radius:8px;">
+    <tr>
+      <td style="padding:14px 16px;font-size:14px;color:#0f172a;">
+        <table role="presentation" cellspacing="0" cellpadding="0" border="0" width="100%">
+          <tr>
+            <td style="padding:4px 0;color:#64748b;">Project</td>
+            <td style="padding:4px 0;text-align:right;">{{ project_title }}</td>
+          </tr>
+          <tr>
+            <td style="padding:4px 0;color:#64748b;">Location</td>
+            <td style="padding:4px 0;text-align:right;">{{ joining_location }}</td>
+          </tr>
+          <tr>
+            <td style="padding:4px 0;color:#64748b;">Duration</td>
+            <td style="padding:4px 0;text-align:right;">{{ start_date }} → {{ end_date }}</td>
+          </tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+
+  <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:24px 0;">
+    <tr>
+      <td>
+        <a href="{{ magic_url }}"
+           style="display:inline-block;background:#10b981;color:#ffffff;text-decoration:none;padding:12px 22px;border-radius:8px;font-size:14px;font-weight:500;">
+          Open my joining form
+        </a>
+      </td>
+    </tr>
+  </table>
+
+  <p style="margin:0;font-size:13px;color:#64748b;">
+    This link is single-use and expires on {{ expires_at }}. If it expires
+    before you can fill the form, ask HR to resend or use the resend
+    option from the candidate portal.
+  </p>
+{% endblock %}
+
+{% block footer %}
+  <br />
+  Need help? Reply to this email and HR will get back to you.
+{% endblock %}

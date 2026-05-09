@@ -44,11 +44,12 @@ async def create_user(
             temporary_password="DevTemp!1234",
         )
     try:
-        from msgraph.graph_service_client import GraphServiceClient
-        from azure.identity.aio import ClientSecretCredential
-        from msgraph.generated.models.user import User as GraphUser
-        from msgraph.generated.models.password_profile import PasswordProfile
         import secrets
+
+        from azure.identity.aio import ClientSecretCredential
+        from msgraph.generated.models.password_profile import PasswordProfile
+        from msgraph.generated.models.user import User as GraphUser
+        from msgraph.graph_service_client import GraphServiceClient
 
         credential = ClientSecretCredential(
             tenant_id=cfg.graph_tenant_id,
@@ -68,12 +69,14 @@ async def create_user(
             ),
         )
         result = await client.users.post(body)
+        if result is None or result.id is None:
+            raise GraphApiError()
         return CreatedAdUser(
             aad_object_id=str(result.id),
             user_principal_name=upn,
             temporary_password=temporary_password,
         )
-    except Exception as exc:  # noqa: BLE001 — graph errors are integration errors
+    except Exception as exc:
         logger.exception("nexhire.access.graph.create_failed")
         raise GraphApiError() from exc
 
@@ -83,9 +86,9 @@ async def set_account_enabled(*, aad_object_id: str, enabled: bool) -> None:
     if not (cfg.graph_tenant_id and cfg.graph_client_id and cfg.graph_client_secret):
         return  # dev no-op
     try:
-        from msgraph.graph_service_client import GraphServiceClient
         from azure.identity.aio import ClientSecretCredential
         from msgraph.generated.models.user import User as GraphUser
+        from msgraph.graph_service_client import GraphServiceClient
 
         credential = ClientSecretCredential(
             tenant_id=cfg.graph_tenant_id,
@@ -96,7 +99,7 @@ async def set_account_enabled(*, aad_object_id: str, enabled: bool) -> None:
         await client.users.by_user_id(aad_object_id).patch(
             GraphUser(account_enabled=enabled)
         )
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         logger.exception("nexhire.access.graph.patch_failed")
         raise GraphApiError() from exc
 

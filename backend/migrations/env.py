@@ -22,17 +22,19 @@ if config.config_file_name is not None:
 settings = get_settings()
 # asyncpg URL is for runtime; alembic uses the sync driver.
 sync_url = settings.database_url.replace("+asyncpg", "+psycopg2")
-config.set_main_option("sqlalchemy.url", sync_url)
+# configparser uses `%` for interpolation; double it so URL-encoded `%`
+# characters in the password (e.g. `%40` for `@`) survive the round-trip.
+config.set_main_option("sqlalchemy.url", sync_url.replace("%", "%%"))
 
 
 # Import every module that defines ORM models so Base.metadata is fully
 # populated. Adding a new model? Add an import line here.
-from app.infrastructure.database import Base  # noqa: E402
 from app.infrastructure import outbox_models  # noqa: E402, F401
+from app.infrastructure.database import Base  # noqa: E402
 from app.modules.auth import models as _auth_models  # noqa: E402, F401
-from app.modules.referral import models as _referral_models  # noqa: E402, F401
-from app.modules.onboarding import models as _onboarding_models  # noqa: E402, F401
 from app.modules.nda import models as _nda_models  # noqa: E402, F401
+from app.modules.onboarding import models as _onboarding_models  # noqa: E402, F401
+from app.modules.referral import models as _referral_models  # noqa: E402, F401
 
 target_metadata = Base.metadata
 

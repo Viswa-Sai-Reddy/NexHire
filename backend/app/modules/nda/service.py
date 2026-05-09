@@ -12,8 +12,10 @@ Operations:
 """
 from __future__ import annotations
 
+import hashlib
 import logging
-from datetime import datetime, timedelta, timezone
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import select
@@ -37,13 +39,12 @@ from app.shared.constants import (
     ReferralStatus,
 )
 from app.shared.domain_events import DomainEvent
-from dataclasses import dataclass
 
 logger = logging.getLogger("nexhire.nda.service")
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -53,7 +54,7 @@ def _utcnow() -> datetime:
 class NdaIssued(DomainEvent):
     intern_id: UUID
     referral_id: UUID
-    envelope_id: str
+    envelope_id: str | None  # None on the in-app click-to-accept path
     signing_url: str
     candidate_email: str
 
@@ -109,16 +110,16 @@ async def issue_for_intern(
 
     cfg = get_settings()
     if not cfg.opensign_base_url:
-        # Dev shortcut: pretend an envelope was created so downstream
-        # FSM transitions still flow. Real OpenSign integration takes
-        # over the moment credentials are configured.
-        envelope_id = f"dev-env-{intern_id}"
-        signing_url = "about:blank"
+        # In-app click-to-accept path. The candidate will accept on the
+        # NexHire portal at /candidate/nda; no OpenSign envelope created.
+        # `opensign_envelope_id` stays NULL; the audit trail lives on the
+        # `nda_records` row itself once the candidate accepts.
+        envelope_id = None
+        signing_url = "/candidate/nda"
     else:
-        # Real path. The template PDF lookup lives in the Document
-        # Storage S5 expansion; for now we ship a tiny placeholder.
+        template_pdf = await _load_nda_template()
         result = await opensign_client.create_envelope(
-            template_pdf_bytes=_dev_pdf_placeholder(),
+            template_pdf_bytes=template_pdf,
             candidate_name=referral.candidate_name,
             candidate_email=referral.candidate_email,
             metadata={
@@ -160,6 +161,7 @@ async def issue_for_intern(
         actor_role="SYSTEM",
         payload={
             "envelope_id": envelope_id,
+            "signing_mode": "opensign" if envelope_id else "in_app",
             "referral_id": str(referral.id),
         },
         session=session,
@@ -176,8 +178,57 @@ async def issue_for_intern(
     return record
 
 
+async def _load_nda_template() -> bytes:
+    """Resolve the active NDA template PDF.
+
+    Order of resolution:
+      1. `NDA_TEMPLATE_LOCAL_PATH` env (developer convenience — point at a
+         file on disk).
+      2. Azure Blob: `<documents>/templates/nda-<version>.pdf`. Version
+         comes from `NDA_TEMPLATE_VERSION` (defaults to "v1").
+      3. The bundled tiny placeholder PDF — only used when neither of the
+         above resolve. OpenSign will accept it but the rendered envelope
+         will show no template content.
+
+    The lookup is deliberately defensive — a misconfigured template
+    must not block the FSM, only degrade the candidate's signing UX.
+    Audit + error logging surface the degraded path so operators see it.
+    """
+    cfg = get_settings()
+    local = getattr(cfg, "nda_template_local_path", "") or ""
+    if local:
+        try:
+            import asyncio
+            from pathlib import Path
+
+            return await asyncio.to_thread(Path(local).read_bytes)
+        except OSError:
+            logger.warning(
+                "nexhire.nda.template_local_unreadable",
+                extra={"path": local},
+            )
+
+    if cfg.azure_blob_account_url:
+        try:
+            from app.infrastructure import azure_blob
+
+            version = getattr(cfg, "nda_template_version", "") or "v1"
+            blob_key = f"templates/nda-{version}.pdf"
+            client = azure_blob.get_client().get_blob_client(
+                container=cfg.azure_blob_container_documents,
+                blob=blob_key,
+            )
+            stream = await client.download_blob()
+            return await stream.readall()
+        except Exception:
+            logger.exception("nexhire.nda.template_blob_failed")
+
+    logger.warning("nexhire.nda.template_fallback_to_placeholder")
+    return _dev_pdf_placeholder()
+
+
 def _dev_pdf_placeholder() -> bytes:
-    """Tiny valid PDF — real template upload from Blob lands in S5."""
+    """Tiny valid PDF — used only when no real template is configured."""
     return (
         b"%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<</Root 1 0 R>>\n%%EOF\n"
     )
@@ -231,6 +282,101 @@ async def mark_signed(
         NdaSigned(intern_id=record.intern_id, referral_id=referral.id)
     )
     _ = signed_pdf  # archived to Blob in S5 alongside the doc module
+    return record
+
+
+async def accept_inapp(
+    session: AsyncSession,
+    *,
+    intern_id: UUID,
+    typed_name: str,
+    text_sha256: str,
+    template_text: str,
+    ip: str | None,
+    user_agent: str | None,
+) -> NdaRecord:
+    """Click-to-accept NDA path for staging/pilot deployments.
+
+    The candidate has read the rendered HTML at /candidate/nda, ticked
+    the agree box, and typed their full legal name. The frontend echoes
+    back the SHA-256 of the text version it rendered; we recompute and
+    compare to make sure the candidate didn't accept a stale draft.
+
+    Validation:
+      * `text_sha256` from the client must equal sha256(template_text).
+      * `typed_name` (case-insensitive, whitespace-trimmed) must equal
+        the candidate's name on the referral.
+
+    Idempotent on `status == SIGNED`.
+    """
+    from app.shared.exceptions import BusinessRuleError
+
+    record = await _by_intern_id(session, intern_id)
+    if record.status == NdaStatus.SIGNED.value:
+        return record
+
+    referral = await _referral_for(session, record)
+
+    expected_sha = hashlib.sha256(template_text.encode("utf-8")).hexdigest()
+    if text_sha256 != expected_sha:
+        raise BusinessRuleError(
+            user_message=(
+                "The NDA wording has been updated since you opened this page. "
+                "Please refresh and re-read before accepting."
+            ),
+            details={"expected_sha256": expected_sha},
+        )
+
+    expected_name = referral.candidate_name.strip().casefold()
+    actual_name = (typed_name or "").strip().casefold()
+    if not actual_name or actual_name != expected_name:
+        raise BusinessRuleError(
+            user_message=(
+                "Typed name doesn't match the name on your referral. "
+                "Please type your full legal name exactly as it appears."
+            ),
+        )
+
+    now = _utcnow()
+    record.status = NdaStatus.SIGNED.value
+    record.signed_at = now
+    record.typed_name = typed_name.strip()
+    record.accepted_ip = ip
+    record.accepted_user_agent = (user_agent or "")[:512] or None
+    record.text_sha256 = expected_sha
+
+    referral.status = ReferralStatus.NDA_SIGNED.value
+    referral.current_stage = ReferralStatus.NDA_SIGNED.value
+    referral.stage_entered_at = now
+    referral.updated_at = now
+
+    session.add(
+        ReferralStageHistory(
+            referral_id=referral.id,
+            from_status=ReferralStatus.NDA_PENDING.value,
+            to_status=ReferralStatus.NDA_SIGNED.value,
+            actor_id=AI_SYSTEM_USER_ID,
+            actor_role="SYSTEM",
+            reason="NDA accepted by candidate (in-app).",
+        )
+    )
+
+    await audit.publish(
+        event_type="NDA_SIGNED",
+        entity_type="INTERN",
+        entity_id=record.intern_id,
+        actor_user_id=AI_SYSTEM_USER_ID,
+        actor_role="SYSTEM",
+        payload={
+            "accepted_via": "in_app",
+            "text_sha256": expected_sha,
+            "signed_at": now.isoformat(),
+        },
+        session=session,
+    )
+    await get_bus().publish(
+        NdaSigned(intern_id=record.intern_id, referral_id=referral.id)
+    )
     return record
 
 
@@ -383,6 +529,24 @@ async def _by_envelope(
     return record
 
 
+async def _by_intern_id(
+    session: AsyncSession, intern_id: UUID
+) -> NdaRecord:
+    record = (
+        await session.execute(
+            select(NdaRecord).where(NdaRecord.intern_id == intern_id)
+        )
+    ).scalar_one_or_none()
+    if record is None:
+        from app.shared.exceptions import BusinessRuleError
+
+        raise BusinessRuleError(
+            user_message="NDA record not found for this intern.",
+            details={"intern_id": str(intern_id)},
+        )
+    return record
+
+
 async def _referral_for(session: AsyncSession, record: NdaRecord) -> Referral:
     return (
         await session.execute(
@@ -393,13 +557,37 @@ async def _referral_for(session: AsyncSession, record: NdaRecord) -> Referral:
     ).scalar_one()
 
 
+async def render_nda_html(*, candidate_name: str) -> tuple[str, str]:
+    """Render the NDA template + return `(html, sha256)`.
+
+    Reused by both the candidate-portal endpoint and the `accept_inapp`
+    validator so the SHA the candidate echoes back matches what they
+    just read. Centralizing here means any wording tweak (via the
+    template-management endpoints) automatically flips the hash.
+    """
+    from app.modules.notification import template_renderer
+
+    rendered = template_renderer.render(
+        "nda",
+        subject="Internship Non-Disclosure Agreement",
+        context={
+            "candidate_name": candidate_name,
+            "template_version": "v1",
+        },
+    )
+    sha = hashlib.sha256(rendered.html.encode("utf-8")).hexdigest()
+    return rendered.html, sha
+
+
 __all__ = [
     "NdaAutoRejected",
     "NdaDeclined",
     "NdaIssued",
     "NdaSigned",
+    "accept_inapp",
     "auto_reject_expired",
     "issue_for_intern",
     "mark_declined",
     "mark_signed",
+    "render_nda_html",
 ]

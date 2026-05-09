@@ -24,7 +24,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from functools import wraps
 from typing import Any
 
@@ -33,6 +33,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.config import get_settings
 from app.infrastructure.redis_client import acquire_lock
+from app.shared.exceptions import RedisUnavailableError
 
 logger = logging.getLogger("nexhire.scheduler")
 
@@ -54,7 +55,7 @@ def init_scheduler() -> AsyncIOScheduler:
     sync_url = cfg.database_url.replace("+asyncpg", "+psycopg2")
     _scheduler = AsyncIOScheduler(
         jobstores={"default": SQLAlchemyJobStore(url=sync_url, tablename="apscheduler_jobs")},
-        timezone=timezone.utc,
+        timezone=UTC,
         job_defaults={"coalesce": True, "max_instances": 1, "misfire_grace_time": 300},
     )
     logger.info("nexhire.scheduler.initialized")
@@ -111,6 +112,14 @@ def idempotent_job(
             key = f"{job_name}:{bucket()}"
             try:
                 acquired = await acquire_lock(key, lock_ttl_seconds)
+            except RedisUnavailableError:
+                # Redis is down — known-bad path. Single one-liner per
+                # firing rather than a full traceback storm.
+                logger.warning(
+                    "nexhire.scheduler.lock_skipped_redis_down",
+                    extra={"job": job_name},
+                )
+                return
             except Exception as exc:
                 logger.error(
                     "nexhire.scheduler.lock_error",
@@ -162,7 +171,7 @@ async def _dead_letter(job_name: str, exc: BaseException) -> None:
         "nexhire.scheduler.dead_lettered",
         extra={
             "job": job_name,
-            "failed_at": datetime.now(timezone.utc).isoformat(),
+            "failed_at": datetime.now(UTC).isoformat(),
             "error": str(exc),
         },
     )
@@ -170,16 +179,16 @@ async def _dead_letter(job_name: str, exc: BaseException) -> None:
 
 # Convenience bucket helpers.
 def bucket_daily() -> str:
-    return datetime.now(timezone.utc).date().isoformat()
+    return datetime.now(UTC).date().isoformat()
 
 
 def bucket_hourly() -> str:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return now.strftime("%Y-%m-%dT%H")
 
 
 def bucket_six_hourly() -> str:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return f"{now.date().isoformat()}T{now.hour // 6:02d}"
 
 
@@ -196,13 +205,17 @@ def register_interval_job(
     **kwargs: Any,
 ) -> None:
     sched = get_scheduler()
+    interval_kwargs: dict[str, int] = {}
+    if hours is not None:
+        interval_kwargs["hours"] = hours
+    if minutes is not None:
+        interval_kwargs["minutes"] = minutes
     sched.add_job(
         fn,
         trigger="interval",
         id=job_id,
         replace_existing=True,
-        hours=hours,
-        minutes=minutes,
+        **interval_kwargs,
         **kwargs,
     )
     logger.info(

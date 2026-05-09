@@ -1,6 +1,8 @@
 """Mentor request → accept / reject / 3-strike terminal."""
 from __future__ import annotations
 
+from datetime import UTC
+
 import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -13,7 +15,6 @@ from app.shared.constants import (
     ReferralStatus,
 )
 from tests.factories import future_dates, make_college, make_user, random_pan
-
 
 pytestmark = pytest.mark.asyncio
 
@@ -131,7 +132,7 @@ class TestTimeoutHandler:
     async def test_pending_past_timeout_advances_attempt(
         self, session: AsyncSession
     ) -> None:
-        from datetime import datetime, timedelta, timezone
+        from datetime import datetime, timedelta
 
         referral, _ = await _seed_for_assignment(session)
         await _assign_and_get_tokens(session, referral)
@@ -144,7 +145,7 @@ class TestTimeoutHandler:
                 )
             )
         ).scalar_one()
-        assignment.timeout_at = datetime.now(timezone.utc) - timedelta(hours=1)
+        assignment.timeout_at = datetime.now(UTC) - timedelta(hours=1)
         await session.flush()
 
         handled = await mentor_service.handle_timeouts(session)

@@ -85,7 +85,7 @@ def rate_limit(bucket: Bucket = "default"):  # type: ignore[no-untyped-def]
                 )
         except RateLimitExceededError:
             raise
-        except Exception as exc:  # noqa: BLE001 — fail-open
+        except Exception as exc:
             logger.warning(
                 "nexhire.rate_limit.degraded",
                 extra={"bucket": bucket, "error": exc.__class__.__name__},

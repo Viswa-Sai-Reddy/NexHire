@@ -103,6 +103,7 @@ _ROLE_PERMISSIONS: dict[UserRole, frozenset[Permission]] = {
     UserRole.ADMIN: frozenset(
         {
             Permission.MANAGE_BADGE_ACCESS,
+            Permission.VIEW_SLA_DASHBOARD,
         }
     ),
     UserRole.PROGRAM_OWNER: frozenset(

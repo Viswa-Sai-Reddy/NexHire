@@ -24,6 +24,7 @@ from typing import TYPE_CHECKING
 from app.config import get_settings
 
 if TYPE_CHECKING:
+    from azure.core.credentials_async import AsyncTokenCredential
     from azure.keyvault.secrets.aio import SecretClient
 
 logger = logging.getLogger("nexhire.keyvault")
@@ -32,7 +33,7 @@ KVREF_PREFIX = "kvref:"
 
 
 @lru_cache(maxsize=1)
-def _get_credential() -> object:
+def _get_credential() -> AsyncTokenCredential:
     """Single `DefaultAzureCredential` per process."""
     from azure.identity.aio import DefaultAzureCredential
 
@@ -40,7 +41,7 @@ def _get_credential() -> object:
 
 
 @lru_cache(maxsize=1)
-def _get_client() -> "SecretClient":
+def _get_client() -> SecretClient:
     from azure.keyvault.secrets.aio import SecretClient
 
     cfg = get_settings()
@@ -90,4 +91,4 @@ async def close() -> None:
     if _get_credential.cache_info().currsize:
         credential = _get_credential()
         if hasattr(credential, "close"):
-            await credential.close()  # type: ignore[func-returns-value]
+            await credential.close()

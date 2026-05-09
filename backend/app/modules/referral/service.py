@@ -22,7 +22,6 @@ from __future__ import annotations
 import hashlib
 import logging
 from datetime import date
-from typing import cast
 from uuid import UUID
 
 from sqlalchemy import select
@@ -32,20 +31,21 @@ from app.config import get_settings
 from app.infrastructure import azure_blob
 from app.infrastructure.event_bus import get_bus
 from app.middleware import audit
+from app.modules.ai import resume_parser
 from app.modules.ai import service as ai_service
 from app.modules.ai.risk_profiler import RiskInput
 from app.modules.auth.models import User
 from app.modules.mentor import service as mentor_service
 from app.modules.referral import college_repository, pan_crypto, validator
-from app.modules.referral.models import College, Document, Referral
+from app.modules.referral.models import Document, Referral
 from app.modules.referral.schemas import (
     ReferralSubmitRequest,
     ReferralSubmitResponse,
 )
 from app.shared.constants import (
     ALLOWED_UPLOAD_MIME_TYPES,
-    DocumentType,
     MAX_FILE_SIZE_BYTES,
+    DocumentType,
     ReferralStatus,
 )
 from app.shared.domain_events import (
@@ -65,7 +65,6 @@ from app.shared.value_objects import (
     UserId,
 )
 
-
 logger = logging.getLogger("nexhire.referral.service")
 
 
@@ -79,7 +78,7 @@ async def upload_resume_and_parse(
     mime_type: str,
     file_name: str,
     referrer_id: UUID,
-):  # type: ignore[no-untyped-def]
+) -> tuple[Document, resume_parser.ParseResult]:
     """Validate, store, parse. Returns (document, parse_result)."""
     if mime_type not in ALLOWED_UPLOAD_MIME_TYPES:
         raise InvalidFileTypeError()
@@ -89,14 +88,43 @@ async def upload_resume_and_parse(
     cfg = get_settings()
     sha256 = hashlib.sha256(file_bytes).hexdigest()
 
-    blob_key = await azure_blob.upload(
-        cfg.azure_blob_container_temp,
-        file_bytes,
-        content_type=mime_type,
-        filename=file_name,
+    # Generate a stable document_id up front so Blob upload and AI
+    # parsing can run in parallel — Blob doesn't need it, but the AI
+    # path uses it to cache the OCR'd text for phase 2.
+    from uuid import uuid4
+
+    document_id = uuid4()
+
+    # Run Blob upload and Doc Intelligence + regex extraction in
+    # parallel. Without this, we waited ~1-2s for blob to finish before
+    # even kicking off OCR. Now they run side-by-side and the slower of
+    # the two sets the wall-clock time.
+    import asyncio as _asyncio
+
+    blob_task = _asyncio.create_task(
+        azure_blob.upload(
+            cfg.azure_blob_container_temp,
+            file_bytes,
+            content_type=mime_type,
+            filename=file_name,
+        )
+    )
+    parse_task = _asyncio.create_task(
+        ai_service.parse_resume_and_persist(
+            session,
+            referral_id=None,
+            document_id=document_id,
+            file_bytes=file_bytes,
+            mime_type=mime_type,
+            persist_now=False,  # we'll persist below in this txn
+        )
     )
 
+    blob_key = await blob_task
+    parse_result, ai_parse_row = await parse_task
+
     document = Document(
+        id=document_id,
         document_type=DocumentType.RESUME.value,
         azure_blob_container=cfg.azure_blob_container_temp,
         azure_blob_key=blob_key,
@@ -107,15 +135,9 @@ async def upload_resume_and_parse(
         uploaded_by=referrer_id,
     )
     session.add(document)
+    if ai_parse_row is not None:
+        session.add(ai_parse_row)
     await session.flush()
-
-    # Persists an `ai_parse_results` row regardless of outcome.
-    parse_result = await ai_service.parse_resume_and_persist(
-        session,
-        referral_id=None,  # no referral row yet — link happens on submit
-        file_bytes=file_bytes,
-        mime_type=mime_type,
-    )
 
     await get_bus().publish(
         ResumeAnalyzed(
@@ -305,7 +327,7 @@ async def submit(
     )
 
     return ReferralSubmitResponse(
-        referral_id=cast(UUID, referral.id),
+        referral_id=referral.id,
         status=referral.status,
         risk_score=risk_result.risk_score,
         risk_classification=risk_result.classification,
@@ -321,28 +343,26 @@ async def list_eligible_mentors(
     *,
     threshold: int,
     exclude_user_id: UUID | None = None,
-):  # type: ignore[no-untyped-def]
+) -> list[tuple[User, int]]:
     """Returns (User, active_mentee_count) pairs where can_mentor=true
     and the user is active. Excludes the requesting referrer (RULE-E3
     UI hint; the validator still hard-blocks at submit).
     """
-    from sqlalchemy import func, text
+    from sqlalchemy import and_, func
+
+    from app.modules.referral.models import MentorAssignment
 
     base = (
         select(
             User,
-            func.coalesce(
-                func.count(text("ma.id")).filter(text("ma.status = 'ACCEPTED'")),
-                0,
-            ).label("active_mentees"),
+            func.count(MentorAssignment.id).label("active_mentees"),
         )
-        .join(
-            text(
-                "mentor_assignments AS ma "
-                "ON ma.mentor_id = users.id "
-                "AND ma.status = 'ACCEPTED'"
+        .outerjoin(
+            MentorAssignment,
+            and_(
+                MentorAssignment.mentor_id == User.id,
+                MentorAssignment.status == "ACCEPTED",
             ),
-            isouter=True,
         )
         .where(User.can_mentor.is_(True), User.is_active.is_(True))
         .group_by(User.id)

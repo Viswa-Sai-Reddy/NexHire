@@ -4,7 +4,6 @@ from __future__ import annotations
 from datetime import date, timedelta
 
 import pytest
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.modules.lifecycle import service as lifecycle
@@ -22,7 +21,6 @@ from app.shared.exceptions import (
     InvalidExtensionDurationError,
 )
 from tests.factories import future_dates, make_college, make_user, random_pan
-
 
 pytestmark = pytest.mark.asyncio
 

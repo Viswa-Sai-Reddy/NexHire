@@ -21,7 +21,6 @@ export function Stepper({
 }) {
   return (
     <ol
-      role="list"
       aria-label="Referral form steps"
       className="flex flex-wrap items-center gap-2 md:gap-4"
     >

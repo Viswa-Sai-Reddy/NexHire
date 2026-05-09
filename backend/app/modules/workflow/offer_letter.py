@@ -17,13 +17,14 @@ from __future__ import annotations
 
 import hashlib
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.middleware import audit
+from app.modules.notification import template_renderer
 from app.modules.onboarding.models import Intern
 from app.modules.referral.models import (
     AiAutoAction,
@@ -97,18 +98,33 @@ async def render_and_send(
 
 
 def _render_html(*, intern: Intern, referral: Referral) -> str:
-    """Minimal placeholder. The full template lives in
-    app/modules/notification/templates/offer_letter.html in S5.
+    """Render the offer letter via the shared Jinja renderer.
+
+    Template: `app/modules/notification/templates/offer_letter.html`.
+    Mentor name lookup is best-effort — if the User row isn't materialized
+    here, the template falls back gracefully.
     """
-    return (
-        f"<html><body><h1>Offer Letter</h1>"
-        f"<p>Dear {referral.candidate_name},</p>"
-        f"<p>You are confirmed as an intern, "
-        f"Non-Worker ID: {intern.non_worker_id}.</p>"
-        f"<p>Start date: {referral.internship_start_date}<br/>"
-        f"End date: {referral.internship_end_date}</p>"
-        f"</body></html>"
+    rendered = template_renderer.render(
+        "offer_letter",
+        subject="Offer of Internship",
+        context={
+            "candidate_name": referral.candidate_name,
+            "project_title": referral.project_title or "",
+            "mentor_name": None,  # populated by the notification handler
+                                  # which has access to the mentor User row
+            "start_date": referral.internship_start_date.isoformat()
+            if referral.internship_start_date
+            else "",
+            "end_date": referral.internship_end_date.isoformat()
+            if referral.internship_end_date
+            else "",
+            "joining_location": referral.joining_location or "",
+            "non_worker_id": intern.non_worker_id or "TBD",
+            "portal_url": None,  # candidate portal magic-link URL is added
+                                 # by the notification handler at send time
+        },
     )
+    return rendered.html
 
 
 def _render_pdf(html: str) -> bytes:
@@ -116,10 +132,10 @@ def _render_pdf(html: str) -> bytes:
     WeasyPrint native deps may not be installed.
     """
     try:
-        from weasyprint import HTML  # type: ignore[import-not-found]
+        from weasyprint import HTML
 
         return HTML(string=html).write_pdf() or b""
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.warning("nexhire.workflow.weasyprint_unavailable")
         return html.encode("utf-8")
 
@@ -127,7 +143,7 @@ def _render_pdf(html: str) -> bytes:
 def _recall_until() -> datetime:
     from datetime import timedelta
 
-    return datetime.now(timezone.utc) + timedelta(minutes=RECALL_MINUTES)
+    return datetime.now(UTC) + timedelta(minutes=RECALL_MINUTES)
 
 
 __all__ = ["RECALL_MINUTES", "render_and_send"]

@@ -42,15 +42,57 @@ async def parse_resume_and_persist(
     session: AsyncSession,
     *,
     referral_id: UUID | None,
+    document_id: UUID | None = None,
     file_bytes: bytes,
     mime_type: str,
+    persist_now: bool = True,
+) -> resume_parser.ParseResult | tuple[resume_parser.ParseResult, AiParseResult | None]:
+    """Phase 1 — fast OCR + regex. Pass `document_id` so the cached
+    OCR text can be re-used by `analyze_uploaded_resume`.
+
+    When `persist_now=False`, returns `(parse_result, ai_row)` so the
+    caller can add the row to the session itself (e.g. after running
+    in an `asyncio.gather` alongside other coroutines, where
+    concurrent `session.add` is unsafe).
+    """
+    result = await resume_parser.parse_resume(
+        file_bytes=file_bytes,
+        mime_type=mime_type,
+        document_id=document_id,
+    )
+
+    row = AiParseResult(
+        ai_touchpoint=resume_parser.MODEL_TOUCHPOINT,
+        model_version=_RESUME_MODEL_VERSION,
+        raw_output=result.raw or {},
+        referral_id=referral_id,
+        azure_openai_request_id=result.azure_request_id,
+        confidence_scores=result.confidence_scores or None,
+        tokens_used=result.tokens_used,
+        latency_ms=result.latency_ms,
+        succeeded=result.succeeded,
+        degradation_reason=result.degradation_reason,
+    )
+
+    if persist_now:
+        session.add(row)
+        return result
+    return result, row
+
+
+async def analyze_uploaded_resume(
+    session: AsyncSession,
+    *,
+    document_id: UUID,
+    referral_id: UUID | None = None,
 ) -> resume_parser.ParseResult:
-    result = await resume_parser.parse_resume(file_bytes=file_bytes, mime_type=mime_type)
+    """Phase 2 — slow AI analysis using cached OCR text."""
+    result = await resume_parser.analyze_resume_ai(document_id)
 
     session.add(
         AiParseResult(
             ai_touchpoint=resume_parser.MODEL_TOUCHPOINT,
-            model_version=_RESUME_MODEL_VERSION,
+            model_version=_RESUME_MODEL_VERSION + "+ai_analysis",
             raw_output=result.raw or {},
             referral_id=referral_id,
             azure_openai_request_id=result.azure_request_id,
@@ -209,6 +251,7 @@ async def suggest_mentors_and_persist(
 __all__ = [
     "assess_risk_and_persist",
     "fuzzy_duplicate_check_and_persist",
+    "analyze_uploaded_resume",
     "parse_resume_and_persist",
     "suggest_mentors_and_persist",
 ]

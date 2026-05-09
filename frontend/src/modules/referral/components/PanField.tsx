@@ -1,5 +1,8 @@
+import { AlertCircle, CheckCircle2, Clock, ShieldX } from "lucide-react";
+
 import { usePanCheck } from "@/modules/referral/hooks";
 import type { PanVerdict } from "@/modules/referral/types";
+import { Input } from "@/shared/components/ui";
 
 interface Props {
   value: string;
@@ -9,31 +12,20 @@ interface Props {
 
 const PAN_RE = /^[A-Z]{5}[0-9]{4}[A-Z]$/;
 
-/**
- * PAN input with realtime F-40 verdict banner.
- *
- * The hook debounces 350ms so we don't fire a request per keystroke.
- * `onVerdictChange` lets the wizard host disable the "Next" button
- * for HARD_BLOCK / COOLING_BLOCK without re-fetching.
- */
 export function PanField({ value, onChange, onVerdictChange }: Props) {
   const cleaned = value.trim().toUpperCase();
   const isValidShape = PAN_RE.test(cleaned);
   const check = usePanCheck(cleaned);
 
-  // Bubble verdict changes up.
   const verdict = check.data?.verdict ?? null;
   if (verdict !== null) onVerdictChange(verdict);
 
   return (
     <div className="space-y-2">
-      <label
-        htmlFor="pan"
-        className="block text-sm font-medium"
-      >
+      <label htmlFor="pan" className="block text-sm font-medium">
         PAN Card Number *
       </label>
-      <input
+      <Input
         id="pan"
         type="text"
         autoComplete="off"
@@ -43,11 +35,11 @@ export function PanField({ value, onChange, onVerdictChange }: Props) {
         onChange={(e) => onChange(e.target.value.toUpperCase())}
         placeholder="ABCDE1234F"
         aria-invalid={value.length > 0 && !isValidShape}
-        className="w-full rounded-md border border-border bg-card px-3 py-2 font-mono text-sm uppercase focus:outline-none focus:ring-2 focus:ring-primary"
+        className="font-mono uppercase"
       />
       <p className="text-xs text-muted-foreground">
-        We use this to prevent duplicate referrals across HRs.
-        Stored encrypted; HR sees a masked form by default.
+        We use this to prevent duplicate referrals across HRs. Stored
+        encrypted; HR sees a masked form by default.
       </p>
 
       {value.length > 0 && !isValidShape && (
@@ -72,16 +64,23 @@ function PanVerdictBanner({
 }) {
   if (data.verdict === "CLEAR") {
     return (
-      <p className="rounded-md bg-emerald-50 px-3 py-2 text-sm text-emerald-700">
-        ✅ {data.message}
+      <p className="flex items-start gap-2 rounded-md border border-stage-active/30 bg-stage-active/10 px-3 py-2 text-sm text-stage-active">
+        <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+        {data.message}
       </p>
     );
   }
   if (data.verdict === "HARD_BLOCK") {
     return (
-      <div role="alert" className="rounded-md bg-destructive/10 p-3 text-sm">
-        <p className="font-medium text-destructive">⛔ {data.message}</p>
-        <p className="mt-1 text-xs text-destructive/80">
+      <div
+        role="alert"
+        className="rounded-md border border-destructive/30 bg-destructive/10 p-3 text-sm"
+      >
+        <p className="flex items-center gap-2 font-medium text-destructive">
+          <ShieldX className="h-4 w-4" aria-hidden />
+          {data.message}
+        </p>
+        <p className="mt-1 pl-6 text-xs text-destructive/80">
           PAN is a unique government identifier — override is not permitted.
         </p>
       </div>
@@ -89,15 +88,23 @@ function PanVerdictBanner({
   }
   if (data.verdict === "COOLING_BLOCK") {
     return (
-      <div role="alert" className="rounded-md bg-amber-50 p-3 text-sm">
-        <p className="font-medium text-amber-900">⏳ {data.message}</p>
-        {data.cooling_days_remaining !== null && data.cooling_days_remaining !== undefined && (
-          <p className="mt-1 text-xs text-amber-800">
-            {data.cooling_days_remaining} days remaining · ends {data.cooling_end}
-          </p>
-        )}
+      <div
+        role="alert"
+        className="rounded-md border border-stage-review/30 bg-stage-review/10 p-3 text-sm"
+      >
+        <p className="flex items-center gap-2 font-medium text-stage-review">
+          <Clock className="h-4 w-4" aria-hidden />
+          {data.message}
+        </p>
+        {data.cooling_days_remaining !== null &&
+          data.cooling_days_remaining !== undefined && (
+            <p className="mt-1 pl-6 text-xs text-stage-review/80">
+              {data.cooling_days_remaining} days remaining · ends{" "}
+              {data.cooling_end}
+            </p>
+          )}
         {data.allow_override && (
-          <p className="mt-2 text-xs text-amber-900/80">
+          <p className="mt-2 pl-6 text-xs text-stage-review/80">
             Program Owner can override this with justification.
           </p>
         )}
@@ -105,8 +112,9 @@ function PanVerdictBanner({
     );
   }
   return (
-    <p className="rounded-md bg-amber-50 px-3 py-2 text-sm text-amber-900">
-      ⚠️ {data.message}
+    <p className="flex items-start gap-2 rounded-md border border-stage-review/30 bg-stage-review/10 px-3 py-2 text-sm text-stage-review">
+      <AlertCircle className="mt-0.5 h-4 w-4 shrink-0" aria-hidden />
+      {data.message}
     </p>
   );
 }

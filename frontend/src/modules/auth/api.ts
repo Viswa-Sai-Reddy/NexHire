@@ -10,6 +10,8 @@ export type UserRole =
   | "CANDIDATE"
   | "SYSTEM";
 
+export type RegistrableRole = Exclude<UserRole, "CANDIDATE" | "SYSTEM">;
+
 export interface CurrentUser {
   user_id: string;
   email: string;
@@ -25,10 +27,29 @@ export interface TokenResponse {
   expires_in: number;
 }
 
-export async function loginWithAzureToken(idToken: string): Promise<TokenResponse> {
-  const { data } = await api.post<TokenResponse>("/auth/login", {
-    azure_id_token: idToken,
-  });
+export interface LoginCredentials {
+  email: string;
+  password: string;
+}
+
+export interface RegisterPayload {
+  email: string;
+  full_name: string;
+  password: string;
+  role: RegistrableRole;
+}
+
+export async function loginWithCredentials(
+  creds: LoginCredentials,
+): Promise<TokenResponse> {
+  const { data } = await api.post<TokenResponse>("/auth/login", creds);
+  return data;
+}
+
+export async function registerUser(
+  payload: RegisterPayload,
+): Promise<TokenResponse> {
+  const { data } = await api.post<TokenResponse>("/auth/register", payload);
   return data;
 }
 
@@ -49,4 +70,37 @@ export async function logout(refreshToken: string | null): Promise<void> {
     "/auth/logout",
     refreshToken ? { refresh_token: refreshToken } : undefined,
   );
+}
+
+export interface OutOfOfficeStatus {
+  until: string | null;
+}
+
+export async function getOutOfOffice(): Promise<OutOfOfficeStatus> {
+  const { data } = await api.get<OutOfOfficeStatus>("/auth/me/out-of-office");
+  return data;
+}
+
+export async function setOutOfOffice(
+  until: string | null,
+): Promise<OutOfOfficeStatus> {
+  const { data } = await api.put<OutOfOfficeStatus>(
+    "/auth/me/out-of-office",
+    { until },
+  );
+  return data;
+}
+
+export interface SkillsResponse {
+  skills: string[];
+}
+
+export async function getMySkills(): Promise<SkillsResponse> {
+  const { data } = await api.get<SkillsResponse>("/auth/me/skills");
+  return data;
+}
+
+export async function setMySkills(skills: string[]): Promise<SkillsResponse> {
+  const { data } = await api.put<SkillsResponse>("/auth/me/skills", { skills });
+  return data;
 }

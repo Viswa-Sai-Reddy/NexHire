@@ -21,7 +21,6 @@ from app.shared.exceptions import (
 )
 from tests.factories import make_user
 
-
 pytestmark = pytest.mark.asyncio
 
 

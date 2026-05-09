@@ -4,10 +4,11 @@ import { cn } from "@/lib/utils";
  * Visualizes AI prefill confidence (Blueprint §6.2):
  *   ≥ 0.90 → no badge (high confidence; stay quiet).
  *   0.75–0.89 → amber "AI Suggested".
- *   < 0.75 → red "Please verify".
+ *   0.00–0.75 → red "Please verify".
  *
- * Returns `null` when `confidence` is null/undefined or ≥0.9 — caller
- * can drop it inline without conditionals.
+ * Hidden when `confidence` is null/undefined, exactly 0 (AI didn't
+ * extract anything — the value came from the user, no need to nudge),
+ * or ≥ 0.9.
  */
 export function ConfidenceBadge({
   confidence,
@@ -16,7 +17,12 @@ export function ConfidenceBadge({
   confidence: number | null | undefined;
   className?: string;
 }) {
-  if (confidence === null || confidence === undefined || confidence >= 0.9) {
+  if (
+    confidence === null ||
+    confidence === undefined ||
+    confidence === 0 ||
+    confidence >= 0.9
+  ) {
     return null;
   }
   const low = confidence < 0.75;

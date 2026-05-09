@@ -49,11 +49,11 @@ async def extract_id_doc(file_bytes: bytes, mime_type: str) -> IdDocFields:
         async with client:
             poller = await client.begin_analyze_document(
                 model_id="prebuilt-idDocument",
-                analyze_request={"base64Source": _b64(file_bytes)},
+                body={"base64Source": _b64(file_bytes)},
             )
             result = await poller.result()
         return _parse_id_doc(result)
-    except Exception as exc:  # noqa: BLE001 — assistant is best-effort
+    except Exception as exc:
         logger.warning(
             "nexhire.ai.form_assistant.id_doc_failed",
             extra={"mime_type": mime_type},
@@ -126,4 +126,4 @@ def _looks_like_pan(value: str) -> bool:
     return bool(re.match(r"^[A-Z]{5}[0-9]{4}[A-Z]$", value.strip().upper()))
 
 
-__all__ = ["IdDocFields", "MODEL_TOUCHPOINT", "extract_id_doc"]
+__all__ = ["MODEL_TOUCHPOINT", "IdDocFields", "extract_id_doc"]

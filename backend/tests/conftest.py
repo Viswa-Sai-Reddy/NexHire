@@ -97,7 +97,7 @@ def test_settings(
         "PAN_HMAC_PEPPER": pepper,
         "PAN_AES_KEY": aes_key,
     }
-    cfg = Settings(**cast(dict, overrides))  # type: ignore[arg-type]
+    cfg = Settings(**cast("dict", overrides))  # type: ignore[arg-type]
     # Pin the cached singleton + bust per-key caches that may have read
     # the production settings during a previous test session.
     get_settings.cache_clear()

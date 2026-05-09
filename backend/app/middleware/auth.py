@@ -20,6 +20,7 @@ from uuid import UUID
 
 from fastapi import Depends, Header
 from jose import JWTError, jwt
+from jose.exceptions import ExpiredSignatureError
 
 from app.config import get_settings
 from app.middleware.logging import actor_user_id_ctx
@@ -55,7 +56,7 @@ def _decode(token: str) -> dict[str, object]:
             audience=cfg.jwt_audience,
             issuer=cfg.jwt_issuer,
         )
-    except jwt.ExpiredSignatureError as exc:
+    except ExpiredSignatureError as exc:
         raise JwtExpiredError() from exc
     except JWTError as exc:
         raise JwtInvalidError() from exc

@@ -64,8 +64,7 @@ async def create_envelope(
         "expiry_days": expiry_days,
         "disable_reminders": True,
         "webhook_url": (cfg.opensign_base_url or "")
-        and (cfg.azure_ad_redirect_uri.rsplit("/auth/callback", 1)[0]
-             + "/api/v1/webhooks/opensign"),
+        and (cfg.frontend_base_url + "/api/v1/webhooks/opensign"),
     }
     try:
         async with _client() as client:

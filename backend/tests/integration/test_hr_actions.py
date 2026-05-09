@@ -1,7 +1,7 @@
 """HR review actions: approve / reject / request-correction / recall."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
@@ -25,7 +25,6 @@ from app.shared.exceptions import (
     InsufficientPermissionsError,
 )
 from tests.factories import future_dates, make_college, make_user, random_pan
-
 
 pytestmark = pytest.mark.asyncio
 
@@ -80,7 +79,7 @@ class TestApprove:
             Task(
                 task_type=TaskType.HR_REVIEW.value,
                 assigned_to=hr.id,
-                sla_deadline=datetime.now(timezone.utc) + timedelta(hours=48),
+                sla_deadline=datetime.now(UTC) + timedelta(hours=48),
                 referral_id=referral.id,
                 status=TaskStatus.PENDING.value,
             )
@@ -220,7 +219,7 @@ class TestRecall:
                 action_type="AUTO_APPROVE",
                 decision="EXECUTED",
                 referral_id=referral.id,
-                executed_at=datetime.now(timezone.utc) - timedelta(hours=3),
+                executed_at=datetime.now(UTC) - timedelta(hours=3),
             )
         )
         await session.flush()

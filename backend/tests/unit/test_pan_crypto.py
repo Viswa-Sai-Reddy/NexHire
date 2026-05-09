@@ -13,7 +13,6 @@ from app.config import Settings
 from app.modules.referral import pan_crypto
 from app.shared.exceptions import InvalidPanFormatError
 
-
 pytestmark = pytest.mark.usefixtures("test_settings")
 
 

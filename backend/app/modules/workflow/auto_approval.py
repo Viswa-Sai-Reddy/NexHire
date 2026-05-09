@@ -2,29 +2,30 @@
 
 Trigger: `MentorAccepted` event (mentor clicked Accept).
 
-Six checks (Blueprint §18.3):
-  1. PAN duplicate match → HARD_BLOCK (route to HR with REJECT recommendation).
-  2. Fuzzy duplicate score >= 0.6 → flag.
-  3. Risk score > 25 → flag.
-  4. AI parse confidence < 0.82 (per field) → flag.
-  5. Missing mandatory fields → flag.
-  6. Resume red flags present → one flag per item.
+Mentor acceptance is the sole gate: every accepted referral is
+auto-approved and the candidate receives the joining-form magic link
+immediately. The six AI checks still run for audit and to seed the
+2-hour recall window so HR can intervene if a flagged case needs to be
+revisited.
 
-Outcome (decision A1):
-  * No flags → status = APPROVED, approved_by_label = AI_AUTO_APPROVAL.
-                Publishes ReferralAutoApproved (recall window starts).
-  * Any flag → status = HR_REVIEW, AI-10 routes an HR_REVIEW task.
-                Publishes ReferralRoutedToHr.
+Checks recorded on the `ai_auto_actions` row:
+  1. PAN duplicate match.
+  2. Fuzzy duplicate score >= 0.6.
+  3. Risk score > 25.
+  4. AI parse confidence < 0.82 (per field).
+  5. Missing mandatory fields.
+  6. Resume red flags.
 
-The engine writes one row to `ai_auto_actions` per evaluation so
-ops can audit "AI auto-approved 80% this month" and "the borderline
-20% mostly tripped check #4".
+Outcome:
+  * Always → status = APPROVED, approved_by_label = AI_AUTO_APPROVAL.
+             Publishes ReferralAutoApproved (recall window) and
+             ReferralApproved (onboarding provisions the candidate).
 """
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 from uuid import UUID
 
@@ -33,7 +34,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.infrastructure.event_bus import get_bus
 from app.middleware import audit
-from app.modules.ai import auto_router
 from app.modules.referral.models import (
     AiAutoAction,
     AiParseResult,
@@ -45,13 +45,10 @@ from app.modules.referral.models import (
 from app.shared.constants import (
     AI_SYSTEM_USER_ID,
     ReferralStatus,
-    TaskType,
-    UserRole,
 )
 from app.shared.domain_events import (
     ReferralApproved,
     ReferralAutoApproved,
-    ReferralRoutedToHr,
 )
 from app.shared.value_objects import ReferralId, UserId
 
@@ -65,9 +62,6 @@ MAX_FUZZY_DUPLICATE_SCORE = 0.59  # < 0.6 = below WARN
 # Recall window — decision §17.13 + spec §18.6.
 AUTO_APPROVE_RECALL_HOURS = 2
 
-# HR review SLA (from Blueprint §3.4).
-HR_REVIEW_SLA_BUSINESS_DAYS = 2  # used as clock-hours equivalent for v1
-
 
 HrRecommendation = Literal[
     "LIKELY_APPROVE",
@@ -79,7 +73,7 @@ HrRecommendation = Literal[
 
 @dataclass(frozen=True, slots=True)
 class AutoApprovalResult:
-    decision: Literal["AUTO_APPROVED", "ROUTED_TO_HR"]
+    decision: Literal["AUTO_APPROVED"]
     flags: tuple[str, ...] = ()
     hr_recommendation: HrRecommendation | None = None
     conditions_met: tuple[str, ...] = ()
@@ -110,12 +104,11 @@ async def evaluate_and_route(
     flags: list[str] = []
     conditions: list[str] = []
 
-    # CHECK 1: PAN duplicate (this is a hard block, not just a flag).
-    pan_match = (
+    # CHECK 1: PAN duplicate.
+    if (
         inputs.duplicate is not None
         and inputs.duplicate.match_type == "PAN_EXACT"
-    )
-    if pan_match:
+    ):
         flags.append("PAN duplicate detected — definite re-submission.")
     else:
         conditions.append("No PAN duplicate.")
@@ -161,15 +154,11 @@ async def evaluate_and_route(
     else:
         conditions.append("No resume red flags.")
 
-    if not flags:
-        return await _auto_approve(
-            session, referral=inputs.referral, conditions=conditions
-        )
-    return await _route_to_hr(
+    return await _auto_approve(
         session,
         referral=inputs.referral,
+        conditions=conditions,
         flags=flags,
-        pan_match=pan_match,
     )
 
 
@@ -181,11 +170,13 @@ async def _auto_approve(
     *,
     referral: Referral,
     conditions: list[str],
+    flags: list[str],
 ) -> AutoApprovalResult:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     recall_until = now + timedelta(hours=AUTO_APPROVE_RECALL_HOURS)
 
-    # FSM: MENTOR_ACCEPTED → APPROVED (decision A1: skip HR_REVIEW).
+    # FSM: MENTOR_ACCEPTED → APPROVED. Mentor acceptance is the sole
+    # gate; flags are recorded for audit and recall, not for routing.
     referral.status = ReferralStatus.APPROVED.value
     referral.current_stage = ReferralStatus.APPROVED.value
     referral.stage_entered_at = now
@@ -199,9 +190,14 @@ async def _auto_approve(
         decision="EXECUTED",
         referral_id=referral.id,
         conditions_met=conditions,
-        flags=None,
+        flags=flags or None,
     )
     session.add(auto_action)
+    history_reason = (
+        "AI auto-approved with flags — see ai_auto_actions for detail."
+        if flags
+        else "Clean case — AI auto-approved."
+    )
     session.add(
         ReferralStageHistory(
             referral_id=referral.id,
@@ -209,7 +205,8 @@ async def _auto_approve(
             to_status=ReferralStatus.APPROVED.value,
             actor_id=AI_SYSTEM_USER_ID,
             actor_role="SYSTEM",
-            reason="Clean case — AI auto-approved.",
+            reason=history_reason,
+            payload={"flags": flags} if flags else None,
         )
     )
     await session.flush()
@@ -223,6 +220,7 @@ async def _auto_approve(
         payload={
             "auto_action_id": str(auto_action.id),
             "conditions_met": conditions,
+            "flags": flags,
             "recall_until": recall_until.isoformat(),
         },
         session=session,
@@ -239,7 +237,7 @@ async def _auto_approve(
     )
     # ReferralApproved is the canonical "approval happened" event;
     # onboarding subscribes to it to provision the candidate user +
-    # first magic link, identical for human and AI approvals.
+    # first magic link.
     await bus.publish(
         ReferralApproved(
             referral_id=ReferralId(referral.id),
@@ -252,111 +250,11 @@ async def _auto_approve(
 
     return AutoApprovalResult(
         decision="AUTO_APPROVED",
+        flags=tuple(flags),
         conditions_met=tuple(conditions),
         auto_action_id=auto_action.id,
         recall_until=recall_until,
     )
-
-
-async def _route_to_hr(
-    session: AsyncSession,
-    *,
-    referral: Referral,
-    flags: list[str],
-    pan_match: bool,
-) -> AutoApprovalResult:
-    now = datetime.now(timezone.utc)
-
-    referral.status = ReferralStatus.HR_REVIEW.value
-    referral.current_stage = ReferralStatus.HR_REVIEW.value
-    referral.stage_entered_at = now
-    referral.updated_at = now
-
-    recommendation = _compute_recommendation(flags=flags, pan_match=pan_match)
-
-    # Auto-route the HR_REVIEW task via AI-10.
-    sla_deadline = now + timedelta(hours=48)  # 2 business days, clock-hours v1
-    task = await auto_router.create_routed_task(
-        session,
-        task_type=TaskType.HR_REVIEW,
-        role=UserRole.HR,
-        sla_deadline=sla_deadline,
-        referral_id=referral.id,
-    )
-
-    auto_action = AiAutoAction(
-        action_type="AUTO_APPROVE",
-        decision="HARD_BLOCK" if pan_match else "ROUTED_TO_HR",
-        referral_id=referral.id,
-        flags=flags,
-        hr_recommendation=recommendation,
-    )
-    session.add(auto_action)
-    session.add(
-        ReferralStageHistory(
-            referral_id=referral.id,
-            from_status=ReferralStatus.MENTOR_ACCEPTED.value,
-            to_status=ReferralStatus.HR_REVIEW.value,
-            actor_id=AI_SYSTEM_USER_ID,
-            actor_role="SYSTEM",
-            reason="Routed to HR — auto-approval flagged the referral.",
-            payload={"flags": flags, "recommendation": recommendation},
-        )
-    )
-    await session.flush()
-
-    await audit.publish(
-        event_type="REFERRAL_ROUTED_TO_HR",
-        entity_type="REFERRAL",
-        entity_id=referral.id,
-        actor_user_id=AI_SYSTEM_USER_ID,
-        actor_role="SYSTEM",
-        payload={
-            "auto_action_id": str(auto_action.id),
-            "flags": flags,
-            "hr_recommendation": recommendation,
-            "task_id": str(task.id),
-            "assigned_hr_id": str(task.assigned_to),
-        },
-        session=session,
-    )
-
-    await get_bus().publish(
-        ReferralRoutedToHr(
-            referral_id=ReferralId(referral.id),
-            flags=tuple(flags),
-            hr_recommendation=recommendation,
-            assigned_hr_id=UserId(task.assigned_to),
-        )
-    )
-
-    return AutoApprovalResult(
-        decision="ROUTED_TO_HR",
-        flags=tuple(flags),
-        hr_recommendation=recommendation,
-        auto_action_id=auto_action.id,
-    )
-
-
-def _compute_recommendation(
-    *, flags: list[str], pan_match: bool
-) -> HrRecommendation:
-    if pan_match:
-        return "LIKELY_REJECT"
-    fuzzy_high = any(
-        f.startswith("Possible fuzzy duplicate") and "85%" in f or "86%" in f or "87%" in f
-        or "88%" in f or "89%" in f or "90%" in f or "91%" in f or "92%" in f
-        or "93%" in f or "94%" in f or "95%" in f or "96%" in f or "97%" in f
-        or "98%" in f or "99%" in f
-        for f in flags
-    )
-    if fuzzy_high:
-        return "LIKELY_REJECT"
-    if any(f.startswith("Risk score") for f in flags):
-        return "REVIEW_CAREFULLY"
-    if len(flags) == 1 and flags[0].startswith("Low confidence"):
-        return "LIKELY_APPROVE"
-    return "REQUIRES_REVIEW"
 
 
 # ────────────────────────────────────────────────────────────────────

@@ -16,6 +16,7 @@ from __future__ import annotations
 import logging
 import sys
 import uuid
+from collections.abc import MutableMapping
 from contextvars import ContextVar
 from typing import Any
 
@@ -70,8 +71,8 @@ def configure_logging() -> None:
 
 
 def _add_request_context(
-    _logger: Any, _method_name: str, event_dict: dict[str, Any]
-) -> dict[str, Any]:
+    _logger: Any, _method_name: str, event_dict: MutableMapping[str, Any]
+) -> MutableMapping[str, Any]:
     """Merge request_id / actor / correlation_id into every log record."""
     rid = request_id_ctx.get()
     if rid:
@@ -127,4 +128,5 @@ def _looks_like_uuid(value: str) -> bool:
 
 
 def get_logger(name: str = "nexhire") -> structlog.stdlib.BoundLogger:
-    return structlog.get_logger(name)
+    logger: structlog.stdlib.BoundLogger = structlog.get_logger(name)
+    return logger

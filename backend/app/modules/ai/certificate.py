@@ -18,7 +18,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.config import get_settings
 from app.infrastructure import azure_openai
-from app.middleware import audit
 from app.modules.onboarding.models import Intern
 from app.modules.referral.models import (
     AiAutoAction,
@@ -216,17 +215,17 @@ def _render_pdf(*, intern_name: str, citation: str) -> bytes:
         f"<h2>{intern_name}</h2><p>{citation}</p></body></html>"
     )
     try:
-        from weasyprint import HTML  # type: ignore[import-not-found]
+        from weasyprint import HTML
 
         return HTML(string=html).write_pdf() or b""
-    except Exception:  # noqa: BLE001
+    except Exception:
         return html.encode("utf-8")
 
 
 __all__ = [
-    "GeneratedCitation",
     "MODEL_TOUCHPOINT",
     "RECALL_HOURS",
+    "GeneratedCitation",
     "auto_send_for_intern",
     "generate_citation",
 ]

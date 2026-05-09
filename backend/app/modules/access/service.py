@@ -15,12 +15,13 @@ both access tracks are complete.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import get_settings
 from app.middleware import audit
 from app.modules.access import graph_client
 from app.modules.ai import auto_router
@@ -42,7 +43,7 @@ logger = logging.getLogger("nexhire.access.service")
 
 
 def _utcnow() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 async def request_access_provisioning(
@@ -65,7 +66,7 @@ async def request_access_provisioning(
         - timedelta(days=2)
         if referral.internship_start_date
         else _utcnow() + timedelta(days=2)
-    ).replace(tzinfo=timezone.utc)
+    ).replace(tzinfo=UTC)
 
     ad_task = await _ensure_task(
         session,
@@ -154,11 +155,22 @@ async def complete_ad_provisioning(
 
     nickname = intern.non_worker_id or f"intern-{intern.id.hex[:8]}"
     upn = f"{nickname.lower()}@nexhire.local"
-    created = await graph_client.create_user(
-        display_name=referral.candidate_name,
-        upn=upn,
-        mail_nickname=nickname,
-    )
+    cfg = get_settings()
+    if cfg.ad_provisioning_mode == "postgres":
+        # Postgres-only mode: no Graph call; record the synthetic
+        # username locally and move on. Used when interns don't need to
+        # log into corporate AD.
+        created = graph_client.CreatedAdUser(
+            aad_object_id=f"postgres-{nickname}",
+            user_principal_name=upn,
+            temporary_password="N/A - Postgres-only mode",  # noqa: S106 — placeholder, no real credential
+        )
+    else:
+        created = await graph_client.create_user(
+            display_name=referral.candidate_name,
+            upn=upn,
+            mail_nickname=nickname,
+        )
     intern.ad_account_username = created.user_principal_name
     intern.ad_account_status = AdAccountStatus.PROVISIONED.value
     intern.updated_at = _utcnow()
@@ -189,6 +201,7 @@ async def complete_ad_provisioning(
         payload={
             "user_principal_name": created.user_principal_name,
             "aad_object_id": created.aad_object_id,
+            "provisioning_mode": cfg.ad_provisioning_mode,
         },
         session=session,
     )

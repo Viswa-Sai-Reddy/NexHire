@@ -33,12 +33,11 @@ from app.shared.constants import (
 )
 from tests.factories import future_dates, make_college, make_user, random_pan
 
-
 pytestmark = pytest.mark.asyncio
 
 
 async def _build_payload(session: AsyncSession) -> tuple[
-    ReferralSubmitRequest, "object", "object"
+    ReferralSubmitRequest, object, object
 ]:
     referrer = await make_user(session, role="REFERRER")
     mentor = await make_user(session, role="MENTOR", can_mentor=True)
