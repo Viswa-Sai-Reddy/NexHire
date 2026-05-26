@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Award,
@@ -8,6 +9,7 @@ import {
   Clock,
   KeyRound,
   Loader2,
+  LogOut,
   Play,
   ScrollText,
   XCircle,
@@ -30,6 +32,7 @@ import {
   Card,
   CardContent,
 } from "@/shared/components/ui";
+import { setAccessToken } from "@/lib/axios";
 import { cn } from "@/lib/utils";
 
 const TERMINATABLE_STATUSES = new Set(["ACTIVE", "EXTENDED"]);
@@ -68,8 +71,15 @@ function GenericLanding() {
 
 function AuthedStatus() {
   const qc = useQueryClient();
+  const navigate = useNavigate();
   const [showTerminate, setShowTerminate] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  function handleSignOut() {
+    setAccessToken(null);
+    qc.clear();
+    navigate("/candidate/login", { replace: true });
+  }
 
   const intern = useQuery({
     queryKey: ["candidate", "intern"],
@@ -127,7 +137,18 @@ function AuthedStatus() {
                 </p>
               )}
             </div>
-            <StatusPill status={data.status} />
+            <div className="flex items-center gap-2">
+              <StatusPill status={data.status} />
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={handleSignOut}
+              >
+                <LogOut className="h-3.5 w-3.5" aria-hidden />
+                Sign out
+              </Button>
+            </div>
           </header>
 
           <StageBanner stage={stage} />
