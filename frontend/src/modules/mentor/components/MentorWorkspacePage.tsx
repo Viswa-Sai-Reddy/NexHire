@@ -324,8 +324,7 @@ function InternRow({ row }: { row: MentorInternEntry }) {
   const canManageActive =
     internId !== null && (status === "ACTIVE" || status === "EXTENDED");
   const canRespondToAssignment = row.referral_status === "MENTOR_PENDING";
-  const canMarkComplete =
-    internId !== null && !isTerminal && !canRespondToAssignment;
+  const canMarkComplete = canManageActive;
 
   return (
     <Card>

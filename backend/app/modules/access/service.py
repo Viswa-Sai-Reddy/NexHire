@@ -29,6 +29,7 @@ from app.modules.onboarding.models import Intern
 from app.modules.referral.models import Referral, Task
 from app.shared.constants import (
     AdAccountStatus,
+    InternStatus,
     ReferralStatus,
     TaskStatus,
     TaskType,
@@ -90,6 +91,11 @@ async def request_access_provisioning(
         referral.current_stage = ReferralStatus.ACCESS_PENDING.value
         referral.stage_entered_at = _utcnow()
         referral.updated_at = _utcnow()
+    # Mirror onto intern.status so the mentor UI's gate
+    # (`intern_status === ACCESS_PENDING`) shows the Confirm Start button.
+    if intern.status == InternStatus.PENDING.value:
+        intern.status = InternStatus.ACCESS_PENDING.value
+        intern.updated_at = _utcnow()
 
     return ad_task, badge_task
 

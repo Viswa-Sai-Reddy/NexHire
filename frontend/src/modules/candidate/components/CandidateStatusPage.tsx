@@ -26,7 +26,7 @@ import {
   CardContent,
 } from "@/shared/components/ui";
 
-const TERMINAL_STATUSES = new Set(["CLOSED", "TERMINATED"]);
+const TERMINATABLE_STATUSES = new Set(["ACTIVE", "EXTENDED"]);
 
 /**
  * Candidate-facing status portal.
@@ -104,8 +104,7 @@ function AuthedStatus() {
   }
 
   const data = intern.data;
-  const isTerminal = TERMINAL_STATUSES.has(data.status);
-  const canTerminate = !isTerminal;
+  const canTerminate = TERMINATABLE_STATUSES.has(data.status);
 
   return (
     <div className="mx-auto max-w-3xl px-4 py-12 sm:px-6">
