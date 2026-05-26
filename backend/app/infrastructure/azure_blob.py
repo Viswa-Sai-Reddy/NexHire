@@ -49,17 +49,24 @@ async def upload(
     *,
     content_type: str,
     filename: str,
+    blob_key: str | None = None,
+    overwrite: bool = False,
 ) -> str:
-    """Upload bytes to a container under a UUID-based key. Returns the
-    blob key (NOT the full URL — callers compose URLs from container +
-    key as needed).
+    """Upload bytes to a container. Returns the blob key (NOT the full
+    URL — callers compose URLs from container + key as needed).
+
+    If `blob_key` is provided, the data is stored at that exact key —
+    useful when callers (e.g. the certificate generator) need a
+    deterministic, lookup-friendly path. Otherwise a UUID-based key is
+    auto-generated.
     """
-    blob_key = f"{datetime.now(UTC):%Y/%m/%d}/{uuid4()}__{filename}"
+    if blob_key is None:
+        blob_key = f"{datetime.now(UTC):%Y/%m/%d}/{uuid4()}__{filename}"
     try:
         client = get_client().get_blob_client(container=container, blob=blob_key)
         await client.upload_blob(
             data,
-            overwrite=False,
+            overwrite=overwrite,
             content_type=content_type,
         )
         return blob_key

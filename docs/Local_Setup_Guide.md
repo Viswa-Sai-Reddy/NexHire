@@ -161,3 +161,8 @@ These have to be re-obtained or recreated on the new laptop:
 - **Gmail service account JSON file** (`GMAIL_SERVICE_ACCOUNT_JSON_PATH`) — copy the JSON file separately, do not commit
 - **`PAN_AES_KEY` and `PAN_HMAC_PEPPER`** — for local dev you can generate fresh ones, but if you're connecting to a database with already-encrypted PAN data you MUST reuse the originals or the data won't decrypt
 - **The PostgreSQL database itself** — either dump/restore from the old laptop (`pg_dump` / `pg_restore`) or start fresh with `alembic upgrade head` + reseed
+
+
+
+To check the connection of REDIS:
+ powershell -Command "Test-NetConnection nexhire-redis-krv.redis.cache.windows.net -Port 6380"

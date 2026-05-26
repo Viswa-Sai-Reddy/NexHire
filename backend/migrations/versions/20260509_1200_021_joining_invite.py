@@ -1,7 +1,7 @@
 """seed NOTIF_022_JOINING_FORM_INVITE template row
 
-Revision ID: 0019_joining_form_invite_template
-Revises: 0018_skills
+Revision ID: 0021_joining_invite
+Revises: 0020_password_hash
 Created: 2026-05-09 12:00 UTC
 
 Auto-approval after mentor accept now emails the candidate a magic
@@ -15,8 +15,8 @@ from typing import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0019_joining_form_invite_template"
-down_revision: str | None = "0018_skills"
+revision: str = "0021_joining_invite"
+down_revision: str | None = "0020_password_hash"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

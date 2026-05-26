@@ -43,6 +43,7 @@ dependencies = [
     "tenacity>=9.0.0",            # retries
     "python-dateutil>=2.9.0",     # relativedelta for month arithmetic
     "psycopg2-binary>=2.9.12",
+    "reportlab>=4.5.1",
 ]
 
 [dependency-groups]

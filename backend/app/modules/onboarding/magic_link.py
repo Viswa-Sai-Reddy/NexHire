@@ -75,6 +75,23 @@ async def provision_candidate(
         )
         session.add(user)
         await session.flush()
+    elif user.role != UserRole.CANDIDATE.value:
+        # Refusing to silently coerce the role would erase the existing
+        # account's referrer/mentor/HR access. HR must resolve manually.
+        from app.shared.exceptions import BusinessRuleError
+
+        raise BusinessRuleError(
+            user_message=(
+                "This email is already registered with a different role. "
+                "Use a different candidate email or ask an administrator "
+                "to merge or archive the existing account."
+            ),
+            details={
+                "code_hint": "CANDIDATE_EMAIL_COLLISION",
+                "existing_role": user.role,
+                "candidate_email": candidate_email.lower(),
+            },
+        )
 
     intern = (
         await session.execute(
