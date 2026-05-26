@@ -45,12 +45,14 @@ export function useMentorSuggestions(args: {
 }
 
 /* ───────────────────────── College autocomplete ───────────────── */
-export function useCollegeSearch(query: string) {
-  const debounced = useDebounced(query, 200);
+export function useCollegeSearch(
+  query: string,
+  options?: { skipCache?: boolean },
+) {
   return useQuery({
-    queryKey: ["colleges", "search", debounced],
-    queryFn: () => api.searchColleges(debounced),
-    enabled: debounced.trim().length > 0,
+    queryKey: ["colleges", "search", query, options?.skipCache ?? false],
+    queryFn: () => api.searchColleges(query, options),
+    enabled: query.trim().length > 1,
     staleTime: 60_000,
   });
 }

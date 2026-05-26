@@ -20,8 +20,9 @@ export function CollegeCombobox({
   placeholder = "Type college name (e.g. VIT)",
 }: Props) {
   const [query, setQuery] = useState(value?.canonical_name ?? "");
+  const [searchQuery, setSearchQuery] = useState("");
   const [open, setOpen] = useState(false);
-  const search = useCollegeSearch(query);
+  const search = useCollegeSearch(searchQuery);
 
   // When `value` is set from outside (e.g. AI resume parser auto-selects
   // a college) sync the visible text to the canonical name. Without this
@@ -54,8 +55,18 @@ export function CollegeCombobox({
         value={query}
         onChange={(e) => {
           setQuery(e.target.value);
+          setSearchQuery("");
           setOpen(true);
           if (value !== null) onChange(null);
+        }}
+        onKeyDown={(e) => {
+          if (e.key !== "Enter") return;
+          e.preventDefault();
+          const next = query.trim();
+          if (next.length > 1) {
+            setSearchQuery(next);
+            setOpen(true);
+          }
         }}
         onFocus={() => setOpen(true)}
         onBlur={() => window.setTimeout(() => setOpen(false), 100)}
@@ -68,10 +79,15 @@ export function CollegeCombobox({
           role="listbox"
           className="absolute z-10 mt-1 max-h-60 w-full overflow-auto rounded-md border border-border bg-popover text-popover-foreground shadow-lg"
         >
+          {!searchQuery.trim() && query.trim().length > 1 && (
+            <li className="px-3 py-2 text-sm text-muted-foreground">
+              Press Enter to search for colleges.
+            </li>
+          )}
           {search.isLoading && (
             <li className="px-3 py-2 text-sm text-muted-foreground">Searching…</li>
           )}
-          {search.data?.length === 0 && !search.isLoading && (
+          {search.data?.length === 0 && !search.isLoading && searchQuery.trim().length > 1 && (
             <li className="px-3 py-2 text-sm text-muted-foreground">
               No matches. Pick a similar college or contact HR to add a new one.
             </li>

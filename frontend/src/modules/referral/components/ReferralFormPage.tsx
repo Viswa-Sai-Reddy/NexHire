@@ -15,7 +15,7 @@ import { MentorPicker } from "@/modules/referral/components/MentorPicker";
 import { PanField } from "@/modules/referral/components/PanField";
 import { ResumeUploader } from "@/modules/referral/components/ResumeUploader";
 import { Stepper } from "@/modules/referral/components/Stepper";
-import { analyzeUploadedResume, searchColleges } from "@/modules/referral/api";
+import { searchColleges } from "@/modules/referral/api";
 import { useCollegeCap, useSubmitReferral } from "@/modules/referral/hooks";
 import { NexHireApiError } from "@/lib/axios";
 import type {
@@ -133,7 +133,9 @@ export function ReferralFormPage() {
     if (result.college_name) {
       void (async () => {
         try {
-          const matches = await searchColleges(result.college_name as string);
+          const matches = await searchColleges(result.college_name as string, {
+          skipCache: true,
+        });
           const first = matches[0];
           if (first !== undefined) {
             setState((prev) =>
@@ -149,16 +151,6 @@ export function ReferralFormPage() {
 
   const onResumeParsed = (result: ResumePrefillResponse) => {
     applyResumePrefill(result);
-    setAiStatus("running");
-    void (async () => {
-      try {
-        const enriched = await analyzeUploadedResume(result.document_id);
-        applyResumePrefill(enriched);
-        setAiStatus("done");
-      } catch {
-        setAiStatus("failed");
-      }
-    })();
   };
 
   const completed = useMemo(() => {

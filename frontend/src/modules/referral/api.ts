@@ -45,10 +45,16 @@ export async function getCollegeCap(collegeId: string): Promise<CollegeCapStatus
   return data;
 }
 
-export async function searchColleges(q: string): Promise<CollegeSearchResult[]> {
+export async function searchColleges(
+  q: string,
+  options?: { skipCache?: boolean },
+): Promise<CollegeSearchResult[]> {
   if (!q.trim()) return [];
+  const params: Record<string, unknown> = { q, limit: 10 };
+  if (options?.skipCache) params.skip_cache = true;
+
   const { data } = await api.get<CollegeSearchResult[]>("/colleges/search", {
-    params: { q, limit: 10 },
+    params,
   });
   return data;
 }
