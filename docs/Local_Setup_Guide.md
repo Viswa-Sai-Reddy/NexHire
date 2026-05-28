@@ -164,5 +164,7 @@ These have to be re-obtained or recreated on the new laptop:
 
 
 
+Invoke-RestMethod -Uri "https://api.ipify.org"
+
 To check the connection of REDIS:
  powershell -Command "Test-NetConnection nexhire-redis-krv.redis.cache.windows.net -Port 6380"
